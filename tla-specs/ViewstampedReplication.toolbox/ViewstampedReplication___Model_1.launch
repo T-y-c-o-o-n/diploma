@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
+    <stringAttribute key="configurationName" value="Model_1"/>
+    <listAttribute key="modelParameterConstants">
+        <listEntry value="Client;;;0;0"/>
+        <listEntry value="Normal;;;0;0"/>
+        <listEntry value="ViewChange;;;0;0"/>
+        <listEntry value="Reply;;;0;0"/>
+        <listEntry value="RecoveryResponse;;;0;0"/>
+        <listEntry value="Request;;;0;0"/>
+        <listEntry value="Operation;;;0;0"/>
+        <listEntry value="Prepare;;;0;0"/>
+        <listEntry value="StartViewChange;;;0;0"/>
+        <listEntry value="DoViewChange;;;0;0"/>
+        <listEntry value="Commit;;;0;0"/>
+        <listEntry value="Recovering;;;0;0"/>
+        <listEntry value="Replica;;;0;0"/>
+        <listEntry value="Recovery;;;0;0"/>
+        <listEntry value="None;;;0;0"/>
+        <listEntry value="PrepareOk;;;0;0"/>
+        <listEntry value="StartView;;;0;0"/>
+        <listEntry value="Quorum;;;0;0"/>
+    </listAttribute>
+    <stringAttribute key="specName" value="ViewstampedReplication"/>
+</launchConfiguration>
