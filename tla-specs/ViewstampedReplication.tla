@@ -113,7 +113,9 @@ Execute(op) == op
 
 PrimaryReplicaInView(v) == ReplicaSequence[(v % Len(ReplicaSequence)) + 1]
 
-IsPrimary(r) == PrimaryReplicaInView(viewNumber[r]) = r
+IsPrimaryInView(r, v) == PrimaryReplicaInView(v) = r
+
+IsPrimary(r) == IsPrimaryInView(r, viewNumber[r])
 
 ClientSendRequest(c) ==
     \* TODO: add per Client state with operation status, e.t.c...
@@ -136,13 +138,12 @@ HandleClientRequest(r, m) ==
 
 RecieveClientRequest(r, m) ==
     /\ IsPrimary(r)
-    /\ m \in msgs /\ m.type = Request
+    /\ m.type = Request
     /\ \/ \* drop stale request
           /\ m.s < clientTable[r][m.c].lastReq
           /\ UNCHANGED <<replicaStateVars>>
        \/ \* last request but no result
-          /\ m.s = clientTable[r][m.c].lastReq
-          /\ clientTable[r].result = None
+          /\ m.s > clientTable[r][m.c].lastReq
           /\ HandleClientRequest(r, m)
           /\ UNCHANGED <<viewNumber, status, commitNumber, executedOperations, maxPrepareOkOpNumber>>
        \/ \* resend result
@@ -151,9 +152,6 @@ RecieveClientRequest(r, m) ==
              \* Should we resend current view or view which was after the operation execution ??
              \* Here I send current view but we can save in clientTable the view after the execution
           /\ Send([type |-> Reply, v |-> viewNumber[r], s |-> m.s, x |-> clientTable[r].result])
-          /\ UNCHANGED <<replicaStateVars>>
-       \/ \* request number higher then we know...
-          /\ m.s > clientTable[r][m.c].lastReq
           /\ UNCHANGED <<replicaStateVars>>
     /\ Drop(m)
     /\ UNCHANGED <<lastClientRequestId>>
@@ -219,7 +217,11 @@ Next == \/ \E c \in Client: ClientSendRequest(c)
             \/ RecievePrepareOkFromQuorum(r)
             \/ SendCommit(r)
 
+-----------------------------------------------------------------------------
+
+EveryViewHasPrimary == \A v \in 0..10: \E r \in Replica: IsPrimaryInView(r, v)
+
 =============================================================================
 \* Modification History
-\* Last modified Thu Nov 10 01:01:08 MSK 2022 by tycoon
+\* Last modified Thu Nov 10 01:18:34 MSK 2022 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
