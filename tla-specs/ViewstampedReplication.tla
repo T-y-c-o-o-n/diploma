@@ -128,40 +128,39 @@ ClientSendRequest(c) ==
 
 AddClientRequest(r, m) ==
     /\ opNumber' = [opNumber EXCEPT ![r] = opNumber[r] + 1]
-    /\ log' = Append(log[r], [opNumber |-> opNumber', m |-> m])
+    /\ log' = [log EXCEPT ![r] = Append(log[r], [opNumber |-> opNumber'[r], m |-> m])]
     /\ clientTable' = [clientTable EXCEPT ![r][m.c] = [lastReq |-> m.s, result |-> None]]
 
 
 HandleClientRequest(r, m) ==
     /\ AddClientRequest(r, m)
-    /\ Send([type |-> Prepare, v |-> viewNumber[r], m |-> m, n |-> opNumber', k |-> commitNumber[r]])
+    /\ Send([type |-> Prepare, v |-> viewNumber[r], m |-> m, n |-> opNumber'[r], k |-> commitNumber[r]])
 
 RecieveClientRequest(r, m) ==
     /\ IsPrimary(r)
     /\ m.type = Request
     /\ \/ \* drop stale request
           /\ m.s < clientTable[r][m.c].lastReq
-          /\ UNCHANGED <<replicaStateVars>>
+          /\ UNCHANGED <<replicaStateVars, msgs>>
        \/ \* last request but no result
           /\ m.s > clientTable[r][m.c].lastReq
           /\ HandleClientRequest(r, m)
           /\ UNCHANGED <<viewNumber, status, commitNumber, executedOperations, maxPrepareOkOpNumber>>
        \/ \* resend result
           /\ m.s = clientTable[r][m.c].lastReq
-          /\ clientTable[r].result # None
+          /\ clientTable[r][m.c].result # None
              \* Should we resend current view or view which was after the operation execution ??
              \* Here I send current view but we can save in clientTable the view after the execution
-          /\ Send([type |-> Reply, v |-> viewNumber[r], s |-> m.s, x |-> clientTable[r].result])
+          /\ Send([type |-> Reply, v |-> viewNumber[r], s |-> m.s, x |-> clientTable[r][m.c].result])
           /\ UNCHANGED <<replicaStateVars>>
-    /\ Drop(m)
     /\ UNCHANGED <<lastClientRequestId>>
 
 RecievePrepare(r, m) ==
     /\ ~IsPrimary(r)  \* Need this?
     /\ m.type = Prepare
     /\ m.n = opNumber[r] + 1
-    /\ AddClientRequest(r, m)
-    /\ Send([type |-> PrepareOk, v |-> viewNumber[r], n |-> opNumber[r], i |-> r])
+    /\ AddClientRequest(r, m.m)
+    /\ Send([type |-> PrepareOk, v |-> viewNumber[r], n |-> m.n, i |-> r])
     /\ UNCHANGED <<lastClientRequestId, viewNumber, status, commitNumber, executedOperations, maxPrepareOkOpNumber>>
 
 RecievePrepareOk(p, r, m) ==
@@ -171,17 +170,19 @@ RecievePrepareOk(p, r, m) ==
     /\ m.i = r
     /\ \/ \* stale prepareOkMessage
           /\ m.n <= maxPrepareOkOpNumber[p][r]
+          /\ UNCHANGED <<maxPrepareOkOpNumber>>
        \/ \* 
           /\ m.n > maxPrepareOkOpNumber[p][r]
-          /\ maxPrepareOkOpNumber' = [maxPrepareOkOpNumber EXCEPT ![p][r] = maxPrepareOkOpNumber[p][r] + 1]
+          /\ maxPrepareOkOpNumber' = [maxPrepareOkOpNumber EXCEPT ![p][r] = m.n]
     /\ Drop(m)
-    /\ UNCHANGED <<lastClientRequestId, viewNumber, status, opNumber, log, commitNumber, clientTable, executedOperations, msgs>>
+    /\ UNCHANGED <<lastClientRequestId, viewNumber, status, opNumber, log, commitNumber, clientTable, executedOperations>>
 
 ExecuteClientRequest(r) ==
     /\ Len(executedOperations[r]) < commitNumber[r]
-    /\ LET request == log[r][Len(executedOperations) + 1].m
+    /\ Len(log[r]) >= Len(executedOperations[r]) + 1
+    /\ LET request == log[r][Len(executedOperations[r]) + 1].m
        IN /\ executedOperations' = [executedOperations EXCEPT ![r] = Append(executedOperations[r], request)]
-          /\ clientTable' = [clientTable EXCEPT ![r] = [lastReq |-> request.s,
+          /\ clientTable' = [clientTable EXCEPT ![r][request.c] = [lastReq |-> request.s,
                                                         result |-> Execute(request.op)]]
     /\ UNCHANGED <<lastClientRequestId, viewNumber, status, opNumber, log, commitNumber, maxPrepareOkOpNumber, msgs>>
 
@@ -189,13 +190,14 @@ RecievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
     /\ \E Q \in Quorum:
            \A r \in Q:
-               /\ maxPrepareOkOpNumber[p][r] >= commitNumber[p] + 1
+               \/ maxPrepareOkOpNumber[p][r] >= commitNumber[p] + 1
+               \/ r = p
     /\ commitNumber' = [commitNumber EXCEPT ![p] = commitNumber[p] + 1]
     /\ UNCHANGED <<lastClientRequestId, viewNumber, status, opNumber, log, clientTable, executedOperations, maxPrepareOkOpNumber, msgs>>
 
 SendCommit(p) ==
     /\ IsPrimary(p)
-    /\ Send([type |-> Commit, v |-> viewNumber, k |-> commitNumber[p]])
+    /\ Send([type |-> Commit, v |-> viewNumber[p], k |-> commitNumber[p]])
     /\ UNCHANGED <<lastClientRequestId, replicaStateVars>>
 
 RecieveCommit(r, m) ==
@@ -203,25 +205,35 @@ RecieveCommit(r, m) ==
     /\ m.type = Commit
     /\ m.k > commitNumber[r]
     /\ commitNumber' = [commitNumber EXCEPT ![r] = m.k]
-    /\ Drop(m)
+    /\ Drop(m)  \* TODO: don't remove or send to every replica different messages
     /\ UNCHANGED<<lastClientRequestId, viewNumber, status, opNumber, log, clientTable, executedOperations, maxPrepareOkOpNumber>>
 
-Next == \/ \E c \in Client: ClientSendRequest(c)
-        \/ \E m \in msgs, r \in Replica:
-               \/ RecieveClientRequest(r, m)
-               \/ RecievePrepare(r, m)
-               \/ RecieveCommit(r, m)
+Next == \/ (\E c \in Client: ClientSendRequest(c))
+        \/ \E m \in msgs: \E r \in Replica: RecieveClientRequest(r, m)
+        \/ \E m \in msgs, r \in Replica: RecievePrepare(r, m)
+        \/ \E m \in msgs, r \in Replica: RecieveCommit(r, m)
         \/ \E m \in msgs, p, r \in Replica: RecievePrepareOk(p, r, m)
-        \/ \E r \in Replica:
-            \/ ExecuteClientRequest(r)
-            \/ RecievePrepareOkFromQuorum(r)
-            \/ SendCommit(r)
+        \/ \E r \in Replica: ExecuteClientRequest(r)
+        \/ \E r \in Replica: RecievePrepareOkFromQuorum(r)
+        \/ \E r \in Replica: SendCommit(r)
 
 -----------------------------------------------------------------------------
 
 EveryViewHasPrimary == \A v \in 0..10: \E r \in Replica: IsPrimaryInView(r, v)
 
+ExecutedOperationsPreficesAreEqual == \A r1, r2 \in Replica: \A i \in
+                                          DOMAIN executedOperations[r1]
+                                          \cap DOMAIN executedOperations[r2]:
+                                              executedOperations[r1][i] = executedOperations[r2][i]
+
+LogsPreficesAreEqual == \A r1, r2 \in Replica: \A i \in
+                                          DOMAIN log[r1]
+                                          \cap DOMAIN log[r2]:
+                                              log[r1][i] = log[r2][i]
+
+
+
 =============================================================================
 \* Modification History
-\* Last modified Thu Nov 10 01:18:34 MSK 2022 by tycoon
+\* Last modified Wed Nov 16 21:58:54 MSK 2022 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
