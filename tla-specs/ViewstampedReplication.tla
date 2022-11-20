@@ -290,11 +290,11 @@ LogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesAreEqual(log[r1], log[r2
 
 (* Properties *)
 
-CLientWillRecieveReply == \A c \in Client: (pendingRequest[c] ~> ~pendingRequest[c])
+AllClientsWillBeServed == \A c \in Client: (pendingRequest[c] ~> ~pendingRequest[c])
 
 -----------------------------------------------------------------------------
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Nov 20 15:27:49 MSK 2022 by tycoon
+\* Last modified Sun Nov 20 15:32:12 MSK 2022 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
