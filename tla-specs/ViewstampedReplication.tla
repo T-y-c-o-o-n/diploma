@@ -34,7 +34,7 @@ CONSTANTS Recovery, RecoveryResponse
 CONSTANT ReplicaSequence
 
 \* State on each replica
-VARIABLES viewNumber, status, opNumber, log, commitNumber,
+VARIABLES viewNumber, status, lastNormalView, startViewChangeMsgs, doViewChangeMsgs, opNumber, log, commitNumber,
           clientTable, executedOperations, maxPrepareOkOpNumber
 
 \* Clients state
@@ -42,7 +42,9 @@ VARIABLES lastRequestId, pendingRequest
 
 VARIABLE msgs
 
-replicaStateVars == <<viewNumber, status,
+replicaViewVars == <<viewNumber, status, lastNormalView, startViewChangeMsgs, doViewChangeMsgs>>
+
+replicaStateVars == <<replicaViewVars,
                       opNumber, log, commitNumber,
                       clientTable, executedOperations, maxPrepareOkOpNumber>>
 
@@ -60,14 +62,17 @@ CommitNumber == Nat
 
 RequestMessage == [type: {Request}, op: Operation, c: Client, s: RequestNumber]
 
+LogEntry == [opNumber: Nat, m: RequestMessage]
+
 \* All possible messages
 Message ==      RequestMessage
            \cup [type: {Prepare}, v: View, m: RequestMessage, n: OpNumber, k: CommitNumber]
            \cup [type: {PrepareOk}, v: View, n: OpNumber, i: Replica]
            \cup [type: {Reply}, v: View, s: RequestNumber, x: Result, c: Client]
            \cup [type: {Commit}, v: View, k: CommitNumber]
-
-LogEntry == [opNumber: Nat, m: RequestMessage]
+           \cup [type: {StartViewChange}, v: View, i: Replica]
+           \cup [type: {DoViewChange}, v: View, l: Seq(LogEntry), vv: View, n: OpNumber, k: CommitNumber, i: Replica]
+           \cup [type: {StartView}, v: View, l: Seq(LogEntry), n: OpNumber, k: CommitNumber]
 
 \* TODO: add losing, dublicating, out of order messages
 Send(m) == msgs' = msgs \cup {m}
@@ -84,6 +89,9 @@ TypeOK == /\ lastRequestId \in [Client -> Nat]
           /\ pendingRequest \in [Client -> BOOLEAN]
           /\ viewNumber \in [Replica -> View]
           /\ status \in [Replica -> Status]
+          /\ lastNormalView \in [Replica -> View]
+          /\ startViewChangeMsgs \in [Replica -> Replica]
+          /\ doViewChangeMsgs \in [Replica -> Message]
           /\ opNumber \in [Replica -> Nat]
           /\ log \in [Replica -> Seq(LogEntry)]
           /\ commitNumber \in [Replica -> Nat]
@@ -98,12 +106,19 @@ ASSUME QuorumAssumption == /\ \A Q \in Quorum : Q \subseteq Replica
 
 ASSUME IsFiniteSet(Replica)
 
+max(S) == CHOOSE x \in S: \A y \in S: y <= x
+
+lastOpNumber(l) == IF l = <<>> THEN 0 ELSE l[Len(l)].opNumber
+
 -----------------------------------------------------------------------------
 
 Init == /\ lastRequestId = [c \in Client |-> 0]
         /\ pendingRequest = [c \in Client |-> FALSE]
         /\ viewNumber = [r \in Replica |-> 0]
         /\ status = [r \in Replica |-> Normal]
+        /\ lastNormalView = [r \in Replica |-> 0]
+        /\ startViewChangeMsgs = [r \in Replica |-> {}]
+        /\ doViewChangeMsgs = [r \in Replica |-> {}]
         /\ opNumber = [r \in Replica |-> 0]
         /\ log = [r \in Replica |-> << >>]
         /\ commitNumber = [r \in Replica |-> 0]
@@ -164,7 +179,7 @@ RecieveClientRequest(r, m) ==
        \/ \* last request but no result
           /\ m.s > clientTable[r][m.c].lastReq
           /\ HandleClientRequest(r, m)
-          /\ UNCHANGED <<viewNumber, status, commitNumber, executedOperations, maxPrepareOkOpNumber>>
+          /\ UNCHANGED <<replicaViewVars, commitNumber, executedOperations, maxPrepareOkOpNumber>>
        \/ \* resend result
           /\ m.s = clientTable[r][m.c].lastReq
           /\ clientTable[r][m.c].result # None
@@ -180,21 +195,20 @@ RecievePrepare(r, m) ==
     /\ m.n = opNumber[r] + 1
     /\ AddClientRequest(r, m.m)
     /\ Send([type |-> PrepareOk, v |-> viewNumber[r], n |-> m.n, i |-> r])
-    /\ UNCHANGED <<clientStateVars, viewNumber, status, commitNumber, executedOperations, maxPrepareOkOpNumber>>
+    /\ UNCHANGED <<clientStateVars, replicaViewVars, commitNumber, executedOperations, maxPrepareOkOpNumber>>
 
-RecievePrepareOk(p, r, m) ==
-    /\ p # r
+RecievePrepareOk(p, m) ==
+    /\ p # m.i
     /\ IsPrimary(p)
     /\ m.type = PrepareOk
-    /\ m.i = r
     /\ \/ \* stale prepareOkMessage
-          /\ m.n <= maxPrepareOkOpNumber[p][r]
+          /\ m.n <= maxPrepareOkOpNumber[p][m.i]
           /\ UNCHANGED <<maxPrepareOkOpNumber>>
        \/ \* 
-          /\ m.n > maxPrepareOkOpNumber[p][r]
-          /\ maxPrepareOkOpNumber' = [maxPrepareOkOpNumber EXCEPT ![p][r] = m.n]
+          /\ m.n > maxPrepareOkOpNumber[p][m.i]
+          /\ maxPrepareOkOpNumber' = [maxPrepareOkOpNumber EXCEPT ![p][m.i] = m.n]
     /\ Drop(m)
-    /\ UNCHANGED <<clientStateVars, viewNumber, status, opNumber, log, commitNumber, clientTable, executedOperations>>
+    /\ UNCHANGED <<clientStateVars, replicaViewVars, opNumber, log, commitNumber, clientTable, executedOperations>>
 
 ExecuteRequest(r, request) ==
     /\ executedOperations' = [executedOperations EXCEPT ![r] = Append(executedOperations[r], request)]
@@ -205,7 +219,7 @@ ExecuteClientRequest(r) ==
     /\ Len(executedOperations[r]) < commitNumber[r]
     /\ Len(log[r]) >= Len(executedOperations[r]) + 1
     /\ ExecuteRequest(r, log[r][Len(executedOperations[r]) + 1].m)
-    /\ UNCHANGED <<clientStateVars, viewNumber, status, opNumber, log, commitNumber, maxPrepareOkOpNumber, msgs>>
+    /\ UNCHANGED <<clientStateVars, replicaViewVars, opNumber, log, commitNumber, maxPrepareOkOpNumber, msgs>>
 
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
@@ -216,7 +230,7 @@ AchievePrepareOkFromQuorum(p) ==
     /\ commitNumber' = [commitNumber EXCEPT ![p] = commitNumber[p] + 1]
     /\ ExecuteRequest(p, log[p][commitNumber'[p]].m)
     /\ Send([type |-> Reply, v |-> viewNumber[p], s |-> log[p][commitNumber'[p]].m.s, x |-> clientTable'[p][log[p][commitNumber'[p]].m.c].result, c |-> log[p][commitNumber'[p]].m.c])
-    /\ UNCHANGED <<clientStateVars, viewNumber, status, opNumber, log, maxPrepareOkOpNumber>>
+    /\ UNCHANGED <<clientStateVars, replicaViewVars, opNumber, log, maxPrepareOkOpNumber>>
 
 SendCommit(p) ==
     /\ IsPrimary(p)
@@ -229,17 +243,71 @@ RecieveCommit(r, m) ==
     /\ m.k > commitNumber[r]
     /\ commitNumber' = [commitNumber EXCEPT ![r] = m.k]
     /\ Drop(m)  \* TODO: don't remove or send to every replica different messages
-    /\ UNCHANGED<<clientStateVars, viewNumber, status, opNumber, log, clientTable, executedOperations, maxPrepareOkOpNumber>>
+    /\ UNCHANGED<<clientStateVars, viewNumber, status, doViewChangeMsgs, startViewChangeMsgs, opNumber, log, clientTable, executedOperations, maxPrepareOkOpNumber>>
 
 Next == \/ \E c \in Client: ClientSendRequest(c)
         \/ \E m \in msgs, c \in Client: RecieveReply(c, m)
-        \/ \E m \in msgs: \E r \in Replica: RecieveClientRequest(r, m)
+        \/ \E m \in msgs, r \in Replica: RecieveClientRequest(r, m)
         \/ \E m \in msgs, r \in Replica: RecievePrepare(r, m)
         \/ \E m \in msgs, r \in Replica: RecieveCommit(r, m)
-        \/ \E m \in msgs, p, r \in Replica: RecievePrepareOk(p, r, m)
+        \/ \E m \in msgs, r \in Replica: RecievePrepareOk(r, m)
         \/ \E r \in Replica: ExecuteClientRequest(r)
         \/ \E r \in Replica: AchievePrepareOkFromQuorum(r)
         \/ \E r \in Replica: SendCommit(r)
+
+-----------------------------------------------------------------------------
+
+(* View Changing *)
+
+\* TODO: add cases for StartViewChanging
+StartViewChanging(r) ==
+    /\ status[r] = Normal
+    /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[r] + 1]
+    /\ status' = [status EXCEPT ![r] = ViewChange]
+       \* Send to one replica
+    /\ Send([type |-> StartViewChange, v |-> viewNumber'[r], i |-> r])
+    /\ UNCHANGED <<clientStateVars, doViewChangeMsgs, startViewChangeMsgs, opNumber, log, commitNumber, clientTable, executedOperations, maxPrepareOkOpNumber>>
+
+
+RecieveStartViewChange(r, m) ==
+    \* TODO: check status ?
+    /\ m.type = StartViewChange
+    /\ m.v = viewNumber[r]
+    /\ startViewChangeMsgs' = [startViewChangeMsgs EXCEPT ![r] = startViewChangeMsgs[r] \cup {m.i}]
+    /\ UNCHANGED <<clientStateVars, viewNumber, status, doViewChangeMsgs, opNumber, log, commitNumber, clientTable, executedOperations, maxPrepareOkOpNumber, msgs>>
+
+AchieveStartViewChangeFromQuorum(r) ==
+    /\ \E Q \in Quorum: (Q \cup {r}) \subseteq startViewChangeMsgs[r]
+    /\ Send([type |-> DoViewChange, v |-> viewNumber[r], l |-> log[r], vv |-> lastNormalView[r],
+             n |-> opNumber[r], k |-> commitNumber[r], i |-> r])
+    /\ UNCHANGED <<clientStateVars, replicaStateVars>>
+
+
+RecieveDoViewChange(p, m) ==
+    /\ IsPrimaryInView(p, viewNumber[p])
+    /\ status[p] = ViewChange
+    /\ m.type = DoViewChange
+    /\ m.v = viewNumber[p]
+    /\ doViewChangeMsgs' = [doViewChangeMsgs EXCEPT ![p] = doViewChangeMsgs[p] \cup {m}]
+    /\ UNCHANGED <<clientStateVars, viewNumber, status, startViewChangeMsgs, opNumber, log, commitNumber, clientTable, executedOperations, maxPrepareOkOpNumber, msgs>>
+
+\* Become Primary
+AchieveDoViewChangeFromQuorum(p) ==
+    /\ \E Q \in Quorum: \/ Q \subseteq doViewChangeMsgs[p]
+                        \/ p \in doViewChangeMsgs[p]
+    /\ LET maxVV == max({m.vv : m \in doViewChangeMsgs[p]})
+           maxN == max({m.n : m \in {m \in doViewChangeMsgs[p] : m.vv = maxVV}})
+           maxMsg == CHOOSE m \in doViewChangeMsgs[p]: m.vv = maxVV /\ m.n = maxN
+           newLog == maxMsg.l
+       IN /\ log' = [log EXCEPT ![p] = newLog]
+          /\ opNumber' = [opNumber EXCEPT ![p] = lastOpNumber(newLog)]
+    /\ commitNumber' = [commitNumber EXCEPT ![p] = max({m.k : m \in doViewChangeMsgs[p]})]
+    /\ status' = [status EXCEPT ![p] = Normal]
+    /\ lastNormalView' = [lastNormalView EXCEPT ![p] = viewNumber[p]]
+    /\ Send([type |-> StartView, v |-> viewNumber[p], l |-> log'[p], n |-> opNumber'[p], k |-> commitNumber'[p]])
+    /\ UNCHANGED <<clientStateVars, viewNumber, startViewChangeMsgs, doViewChangeMsgs, opNumber, log, commitNumber, clientTable, executedOperations, maxPrepareOkOpNumber>>
+
+
 
 -----------------------------------------------------------------------------
 
@@ -251,7 +319,7 @@ EventuallyRecievePrepare == \A r \in Replica: WF_vars(\E m \in msgs: RecievePrep
 
 EventuallyRecieveCommit == \A r \in Replica: WF_vars(\E m \in msgs: RecieveCommit(r, m))
 
-EventuallyRecievePrepareOk == \A p, r \in Replica: WF_vars(\E m \in msgs: RecievePrepareOk(p, r, m))
+EventuallyRecievePrepareOk == \A p \in Replica: WF_vars(\E m \in msgs: RecievePrepareOk(p, m))
 
 EventuallyAchievePrepareOkFromQuorum == \A p \in Replica: WF_vars(AchievePrepareOkFromQuorum(p))
 
@@ -269,7 +337,7 @@ LivenessSpec ==
 
 (* Full Spec *)
 
-Spec == Init /\ [][Next]_vars /\ LivenessSpec
+Spec == Init /\ [][Next]_vars \* /\ LivenessSpec
 
 -----------------------------------------------------------------------------
 
@@ -292,9 +360,11 @@ LogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesAreEqual(log[r1], log[r2
 
 AllClientsWillBeServed == \A c \in Client: (pendingRequest[c] ~> ~pendingRequest[c])
 
+
+
 -----------------------------------------------------------------------------
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Nov 20 15:32:12 MSK 2022 by tycoon
+\* Last modified Wed Nov 23 16:11:29 MSK 2022 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
