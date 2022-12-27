@@ -165,19 +165,13 @@ RecieveClientRequest(p, op) ==
              v |-> viewNumber[p], m |-> log'[p][opNumber'[p]].m,
              n |-> opNumber'[p], k |-> commitNumber[p]])
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaExecVars, primaryVars, recoveryCount(*, msgs*)>>
-(*
-SendPrepare(p, r) ==
+
+RecieveClientRequestNEW(p, op) ==
     /\ IsPrimary(p)
     /\ status[p] = Normal
-    /\ p # r
-    /\ sentPreparedOpNumber[p][r] < Len(log[p])
-    /\ LET sentOpNumber == sentPreparedOpNumber[p][r] + 1
-       IN /\ sentPreparedOpNumber' = [sentPreparedOpNumber EXCEPT ![p][r] = sentOpNumber]
-          /\ Send([(*src |-> p, dst |-> r, *)type |-> Prepare,
-                   v |-> viewNumber[p], m |-> log[p][sentOpNumber].m,
-                   n |-> sentOpNumber, k |-> commitNumber[p]])
-    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, replicaExecVars, sentStartView, recievedPrepareOkOpNumber, sentCommitNumber>>
-*)
+    /\ AddClientRequest(p, [type |-> Request, op |-> op])
+    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaExecVars, primaryVars, recoveryCount, msgs>>
+
 RecievePrepare(r, m) ==
     /\ ~IsPrimary(r)  \* Need this?
     /\ status[r] = Normal
@@ -185,6 +179,17 @@ RecievePrepare(r, m) ==
     /\ m.v = viewNumber[r]
     /\ m.n = opNumber[r] + 1
     /\ AddClientRequest(r, m.m)
+    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaExecVars, primaryVars, recoveryCount, msgs>>
+
+RecievePrepareNEW(r) ==
+    /\ ~IsPrimary(r)  \* Need this?
+    /\ status[r] = Normal
+    /\ LET primary == PrimaryReplicaInView(viewNumber[r])
+       IN /\ \/ viewNumber[primary] > viewNumber[r]  \* TODO it is not fully correct actually
+             \/ /\ viewNumber[primary] = viewNumber[r]  \* Here should be "primary was in Normal status in our view and had message"
+                /\ status[primary] = Normal
+          /\ opNumber[primary] > opNumber[r]
+          /\ AddClientRequest(r, log[primary][opNumber[r] + 1].m)
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaExecVars, primaryVars, recoveryCount, msgs>>
 
 PrepareOperation(r) ==
@@ -195,6 +200,13 @@ PrepareOperation(r) ==
     /\ Send([(*src |-> r, dst |-> PrimaryReplicaInView(viewNumber[r]), *)type |-> PrepareOk,
              v |-> viewNumber[r], n |-> log[r][prepared'[r]].opNumber, i |-> r])
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, commitNumber, executedOperations, primaryVars, recoveryCount>>
+
+PrepareOperationNEW(r) ==
+    /\ ~IsPrimary(r)
+    /\ status[r] = Normal
+    /\ prepared[r] < Len(log[r])
+    /\ prepared' = [prepared EXCEPT ![r] = prepared[r] + 1]
+    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, commitNumber, executedOperations, primaryVars, recoveryCount, msgs>>
 
 ExecuteRequest(r, request) ==
     /\ executedOperations' = [executedOperations EXCEPT ![r] = Append(executedOperations[r], request)]
@@ -218,6 +230,17 @@ AchievePrepareOkFromQuorum(p) ==
           /\ Send([type |-> Commit, v |-> viewNumber[p], k |-> commitNumber'[p]])
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, prepared, primaryVars, recoveryCount>>
 
+AchievePrepareOkFromQuorumNEW(p) ==
+    /\ Len(executedOperations[p]) = commitNumber[p]
+    /\ LET newCommit == commitNumber[p] + 1
+       IN /\ \E Q \in Quorum:
+                 \A r \in Q:
+                     \/ recievedPrepareOkOpNumber[p][r] >= newCommit
+                     \/ r = p
+          /\ commitNumber' = [commitNumber EXCEPT ![p] = newCommit]
+          /\ ExecuteRequest(p, log[p][newCommit].m)
+    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, prepared, primaryVars, recoveryCount, msgs>>
+
 CheckAchievePrepareOkFromQuorum(p, m) ==
     /\ Len(executedOperations[p]) = commitNumber[p]
     /\ LET newCommit == commitNumber[p] + 1
@@ -231,6 +254,18 @@ CheckAchievePrepareOkFromQuorum(p, m) ==
                /\ UNCHANGED <<prepared>>
           ELSE /\ Drop(m)
                /\ UNCHANGED <<replicaExecVars>>
+
+CheckAchievePrepareOkFromQuorumNEW(p) ==
+    /\ Len(executedOperations[p]) = commitNumber[p]
+    /\ LET newCommit == commitNumber[p] + 1
+       IN IF /\ \E Q \in Quorum:
+                    \A r \in Q:
+                        \/ recievedPrepareOkOpNumber'[p][r] >= newCommit
+                        \/ r = p
+          THEN /\ commitNumber' = [commitNumber EXCEPT ![p] = newCommit]
+               /\ ExecuteRequest(p, log[p][newCommit].m)
+               /\ UNCHANGED <<prepared>>
+          ELSE /\ UNCHANGED <<replicaExecVars>>
 
 RecievePrepareOk(p, m) ==
     /\ m.type = PrepareOk
@@ -246,23 +281,31 @@ RecievePrepareOk(p, m) ==
           /\ recievedPrepareOkOpNumber' = [recievedPrepareOkOpNumber EXCEPT ![p][m.i] = m.n]
           /\ CheckAchievePrepareOkFromQuorum(p, m)
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, recoveryCount(*, sentPreparedOpNumber, sentCommitNumber, sentStartView*)>>
-(*
-SendCommit(p, r) ==
+
+RecievePrepareOkNEW(p, r) ==
     /\ IsPrimary(p)
     /\ status[p] = Normal
-    /\ p # r
-    /\ sentCommitNumber[p][r] < commitNumber[p]
-    /\ Send([(*src |-> p, dst |-> r, *)type |-> Commit,
-             v |-> viewNumber[p], k |-> commitNumber[p]])
-    /\ sentCommitNumber' = [sentCommitNumber EXCEPT ![p][r] = commitNumber[p]]
-    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, replicaExecVars, sentPreparedOpNumber, recievedPrepareOkOpNumber, sentStartView>>
-*)
+    /\ prepared[r] > recievedPrepareOkOpNumber[p][r]
+    /\ recievedPrepareOkOpNumber' = [recievedPrepareOkOpNumber EXCEPT ![p][r] = recievedPrepareOkOpNumber[p][r] + 1]
+    /\ CheckAchievePrepareOkFromQuorumNEW(p)
+    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, recoveryCount, msgs(*, sentPreparedOpNumber, sentCommitNumber, sentStartView*)>>
+
 RecieveCommit(r, m) ==
     /\ ~IsPrimary(r)  \* Need this?
     /\ status[r] = Normal
     /\ m.type = Commit
     /\ m.k > commitNumber[r]
     /\ commitNumber' = [commitNumber EXCEPT ![r] = m.k]
+    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, prepared, executedOperations, primaryVars, recoveryCount, msgs>>
+
+
+RecieveCommitNEW(r) ==
+    /\ ~IsPrimary(r)  \* Need this?
+    /\ status[r] = Normal
+    /\ \E r2 \in Replica:
+        /\commitNumber[r2] > commitNumber[r]
+        \* TODO:set any possible value between commitNumber[r] and commitNumber[r2]
+        /\ commitNumber' = [commitNumber EXCEPT ![r] = commitNumber[r2]] 
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, prepared, executedOperations, primaryVars, recoveryCount, msgs>>
 
 -----------------------------------------------------------------------------
@@ -432,20 +475,16 @@ AchieveRecoveryResponseFromQuorum(r) ==
 -----------------------------------------------------------------------------
 
 
-Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
-\*        \/ \E p, r \in Replica: SendPrepare(p, r)
-        \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
-        \/ \E r \in Replica: PrepareOperation(r)
-        \/ \E r \in Replica, m \in msgs: RecievePrepareOk(r, m)
-        \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
+Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequestNEW(r, op)
+        \/ \E r \in Replica: RecievePrepareNEW(r)
+        \/ \E r \in Replica: PrepareOperationNEW(r)
+        \/ \E p, r \in Replica: RecievePrepareOkNEW(p, r)
+        \/ \E r \in Replica: RecieveCommitNEW(r)
         \/ \E r \in Replica: ExecuteClientRequest(r)
-\*        \/ \E p, r \in Replica: SendCommit(p, r)
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
-\*        \/ \E p, r \in Replica: SendStartViewChange(p, r)
         \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
         \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
         \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
-\*        \/ \E p, r \in Replica: SendStartView(p, r)
         \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
         \/ \E r \in Replica: ReplicaCrash(r)
         \/ \E r \in Replica, m \in msgs: RecoveryReceive(r, m)
@@ -504,5 +543,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(lo
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Dec 02 01:08:27 MSK 2022 by tycoon
+\* Last modified Tue Dec 27 19:16:15 MSK 2022 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
