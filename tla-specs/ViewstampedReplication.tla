@@ -276,7 +276,7 @@ RecievePrepareOk(p, m) ==
           /\ m.n <= recievedPrepareOkOpNumber[p][m.i]
           /\ Drop(m)
           /\ UNCHANGED <<replicaExecVars, recievedPrepareOkOpNumber>>
-       \/ \* 
+       \/ \*
           /\ m.n > recievedPrepareOkOpNumber[p][m.i]
           /\ recievedPrepareOkOpNumber' = [recievedPrepareOkOpNumber EXCEPT ![p][m.i] = m.n]
           /\ CheckAchievePrepareOkFromQuorum(p, m)
@@ -285,7 +285,10 @@ RecievePrepareOk(p, m) ==
 RecievePrepareOkNEW(p, r) ==
     /\ IsPrimary(p)
     /\ status[p] = Normal
+    \* we don't know, if r prepared our request or from new primary or old
+    /\ viewNumber[r] = viewNumber[p]
     /\ prepared[r] > recievedPrepareOkOpNumber[p][r]
+    /\ Len(log[p]) > recievedPrepareOkOpNumber[p][r] + 1
     /\ recievedPrepareOkOpNumber' = [recievedPrepareOkOpNumber EXCEPT ![p][r] = recievedPrepareOkOpNumber[p][r] + 1]
     /\ CheckAchievePrepareOkFromQuorumNEW(p)
     /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, recoveryCount, msgs(*, sentPreparedOpNumber, sentCommitNumber, sentStartView*)>>
@@ -318,15 +321,14 @@ TimeoutStartViewChanging(r) ==
     /\ status' = [status EXCEPT ![r] = ViewChange]
     /\ Send([type |-> StartViewChange, v |-> viewNumber'[r], i |-> r])
     /\ UNCHANGED <<lastNormalView, replicaViewChangeVars, replicaLogVars, replicaExecVars, primaryVars, recoveryCount(*, msgs*)>>
-(*
-SendStartViewChange(r1, r2) ==
-    /\ status[r1] = ViewChange
-    /\ r1 # r2
-    /\ ~ (r2 \in sentStartViewChange[r1])
-    /\ Send([(*src |-> r1, dst |-> r2, *)type |-> StartViewChange, v |-> viewNumber[r1], i |-> r1])
-    /\ sentStartViewChange' = [sentStartViewChange EXCEPT ![r1] = sentStartViewChange[r1] \cup {r2}]
-    /\ UNCHANGED <<replicaViewVars, recievedStartViewChange, recievedDoViewChangeMsgs, replicaLogVars, replicaExecVars, primaryVars>>
-*)
+
+TimeoutStartViewChangingNEW(r) ==
+    /\ status[r] = Normal
+    /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[r] + 1]
+    /\ status' = [status EXCEPT ![r] = ViewChange]
+\*    /\ Send([type |-> StartViewChange, v |-> viewNumber'[r], i |-> r])
+    /\ UNCHANGED <<lastNormalView, replicaViewChangeVars, replicaLogVars, replicaExecVars, primaryVars, recoveryCount, msgs>>
+
 CheckAchieveStartViewChangeFromQuorum(r, v) ==
     /\ IF \E Q \in Quorum: /\ r \in Q
                            /\ Q = recievedStartViewChange'[r] \cup {r}
@@ -358,6 +360,13 @@ RecieveStartViewChange(r, m) ==
                 /\ status[r] = Normal
           /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, msgs>>
     /\ UNCHANGED <<replicaLogVars, replicaExecVars, primaryVars, recoveryCount>>
+
+RecieveStartViewChangeNEW(r) ==
+    /\ \E r2 \in Replica:
+        /\ viewNumber[r2] > viewNumber[r]
+        /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[r2]]
+        /\ status' = [status EXCEPT ![r] = ViewChange]
+    /\ UNCHANGED <<lastNormalView, replicaViewChangeVars, replicaLogVars, replicaExecVars, primaryVars, recoveryCount, msgs>>
 
 RecieveDoViewChange(p, m) ==
     /\ m.type = DoViewChange
@@ -400,17 +409,29 @@ AchieveDoViewChangeFromQuorum(p) ==
     /\ Send([type |-> StartView, v |-> viewNumber[p], l |-> log'[p],
              n |-> opNumber'[p], k |-> commitNumber'[p]])
     /\ UNCHANGED <<viewNumber, prepared, executedOperations, (*sentPreparedOpNumber,*) recievedPrepareOkOpNumber, recoveryCount(*, sentCommitNumber, msgs*)>>
-(*
-SendStartView(p, r) ==
+
+
+\* Become Primary
+AchieveDoViewChangeFromQuorumNEW(p) ==
     /\ IsPrimary(p)
-    /\ status[p] = Normal
-    /\ p # r
-    /\ ~ (r \in sentStartView[p])
-    /\ Send([(*src |-> p, dst |-> r, *)type |-> StartView,
-             v |-> viewNumber[p], l |-> log[p], n |-> opNumber[p], k |-> commitNumber[p]])
-    /\ sentStartView' = [sentStartView EXCEPT ![p] = sentStartView[p] \cup {r}]
-    /\ UNCHANGED <<replicaViewVars, replicaViewChangeVars, replicaLogVars, replicaExecVars, (*sentPreparedOpNumber,*) recievedPrepareOkOpNumber, sentCommitNumber>>
-*)
+    /\ status[p] = ViewChange
+    /\ \E Q \in Quorum:
+        /\ p \in Q
+        /\ \A r \in Q:
+            /\ viewNumber[r] = viewNumber[p]
+            /\ status[r] = ViewChange
+        /\ LET maxVV == max({lastNormalView[r] : r \in Q})
+               maxN == max({opNumber[r] : r \in {r \in Q : lastNormalView[r] = maxVV}})
+               maxReplica == CHOOSE r \in Q: lastNormalView[r] = maxVV /\ opNumber[r] = maxN
+               newLog == log[maxReplica]
+           IN /\ log' = [log EXCEPT ![p] = newLog]
+              /\ opNumber' = [opNumber EXCEPT ![p] = lastOpNumber(newLog)]
+              /\ commitNumber' = [commitNumber EXCEPT ![p] = max({commitNumber[r] : r \in Q})]
+    /\ status' = [status EXCEPT ![p] = Normal]
+    /\ lastNormalView' = [lastNormalView EXCEPT ![p] = viewNumber[p]]
+    /\ UNCHANGED <<viewNumber, replicaViewChangeVars, prepared, executedOperations, recievedPrepareOkOpNumber, recoveryCount, msgs>>
+
+
 RecieveStartView(r, m) ==
     /\ m.type = StartView
     /\ \/ m.v > viewNumber[r]
@@ -423,6 +444,22 @@ RecieveStartView(r, m) ==
     /\ lastNormalView' = [lastNormalView EXCEPT ![r] = viewNumber[r]]
     /\ commitNumber' = [commitNumber EXCEPT ![r] = m.k]
     /\ prepared' = [prepared EXCEPT ![r] = m.k]
+    /\ UNCHANGED <<replicaViewChangeVars, executedOperations, primaryVars, recoveryCount, msgs>>
+
+RecieveStartViewNEW(r) ==
+    /\ \E p \in Replica:
+            /\ IsPrimary(p)
+            /\ status[p] = Normal
+            /\ \/ viewNumber[p] > viewNumber[r]
+               \/ /\ viewNumber[p] = viewNumber[r]
+                  /\ status[r] = ViewChange
+            /\ log' = [log EXCEPT ![r] = log[p]]
+            /\ opNumber' = [opNumber EXCEPT ![r] = opNumber[p]]
+            /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[p]]
+            /\ status' = [status EXCEPT ![r] = Normal]
+            /\ lastNormalView' = [lastNormalView EXCEPT ![r] = viewNumber'[r]]
+            /\ commitNumber' = [commitNumber EXCEPT ![r] = commitNumber[p]]
+            /\ prepared' = [prepared EXCEPT ![r] = commitNumber[p]]
     /\ UNCHANGED <<replicaViewChangeVars, executedOperations, primaryVars, recoveryCount, msgs>>
 
 -----------------------------------------------------------------------------
@@ -481,11 +518,11 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequestNEW(r, op)
         \/ \E p, r \in Replica: RecievePrepareOkNEW(p, r)
         \/ \E r \in Replica: RecieveCommitNEW(r)
         \/ \E r \in Replica: ExecuteClientRequest(r)
-        \/ \E r \in Replica: TimeoutStartViewChanging(r)
-        \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
-        \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
-        \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
-        \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
+        \/ \E r \in Replica: TimeoutStartViewChangingNEW(r)
+        \/ \E r \in Replica: RecieveStartViewChangeNEW(r)
+\*        \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
+        \/ \E r \in Replica: AchieveDoViewChangeFromQuorumNEW(r)
+        \/ \E r \in Replica: RecieveStartViewNEW(r)
         \/ \E r \in Replica: ReplicaCrash(r)
         \/ \E r \in Replica, m \in msgs: RecoveryReceive(r, m)
         \/ \E r \in Replica: AchieveRecoveryResponseFromQuorum(r)
@@ -543,5 +580,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(lo
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Dec 27 19:16:15 MSK 2022 by tycoon
+\* Last modified Wed Dec 28 14:58:16 MSK 2022 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
