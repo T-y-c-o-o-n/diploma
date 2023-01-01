@@ -11,6 +11,9 @@ Status == {Normal, ViewChange, Recovering}
 \* Client operation
 CONSTANT Operation
 
+\* types of log blocks
+CONSTANTS RequestBlock, ViewBlock
+
 \* Result of executing operation
 Result == Operation
 
@@ -61,7 +64,8 @@ CommitNumber == Nat
 
 RequestMessage == [type: {Request}, op: Operation]
 
-LogEntry == [opNumber: Nat, m: RequestMessage]
+LogEntry == [type: RequestBlock, opNumber: Nat, m: RequestMessage]
+       \cup [type: ViewBlock, view: View]
 
 \* All possible messages
 Message == [type: {Recovery}, i: Replica, x: Nat]
@@ -113,12 +117,12 @@ IsPrimary(r) == IsPrimaryInView(r, viewNumber[r])
 
 AddClientRequest(r, m) ==
     /\ opNumber' = [opNumber EXCEPT ![r] = opNumber[r] + 1]
-    /\ log' = [log EXCEPT ![r] = Append(log[r], [opNumber |-> opNumber'[r], m |-> m])]
+    /\ log' = [log EXCEPT ![r] = Append(log[r], [type |-> RequestBlock, opNumber |-> opNumber'[r], m |-> m])]
 
 RecieveClientRequestNEW(p, op) ==
     /\ IsPrimary(p)
     /\ status[p] = Normal
-    /\ AddClientRequest(p, [type |-> Request, op |-> op])
+    /\ AddClientRequest(p, [type |-> RequestBlock, op |-> op])
     /\ UNCHANGED <<replicaViewVars, replicaExecVars, primaryVars, recoveryCount>>
 
 RecievePrepareNEW(r) ==
@@ -225,7 +229,7 @@ AchieveDoViewChangeFromQuorumNEW(p) ==
                maxN == max({opNumber[r] : r \in {r \in Q : lastNormalView[r] = maxVV}})
                maxReplica == CHOOSE r \in Q: lastNormalView[r] = maxVV /\ opNumber[r] = maxN
                newLog == log[maxReplica]
-           IN /\ log' = [log EXCEPT ![p] = newLog]
+           IN /\ log' = [log EXCEPT ![p] = newLog] \* Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])]
               /\ opNumber' = [opNumber EXCEPT ![p] = lastOpNumber(newLog)]
               /\ commitNumber' = [commitNumber EXCEPT ![p] = max({commitNumber[r] : r \in Q})]
     /\ status' = [status EXCEPT ![p] = Normal]
@@ -233,7 +237,7 @@ AchieveDoViewChangeFromQuorumNEW(p) ==
     /\ UNCHANGED <<viewNumber, prepared, executedOperations, recievedPrepareOkOpNumber, recoveryCount>>
 
 RecieveStartViewNEW(r) ==
-    /\ status[r] = Normal
+\*    /\ status[r] = Normal
     /\ \E p \in Replica:
             /\ IsPrimary(p)
             /\ status[p] = Normal
@@ -362,5 +366,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(lo
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Dec 28 17:16:59 MSK 2022 by tycoon
+\* Last modified Sun Jan 01 19:05:31 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
