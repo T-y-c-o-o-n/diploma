@@ -79,7 +79,7 @@ TypeOK == /\ viewNumber \in [Replica -> View]
           /\ log \in [Replica -> Seq(LogEntry)]
           /\ commitNumber \in [Replica -> Nat]
           /\ prepared \in [Replica -> Nat]
-          /\ executedOperations \in [Replica -> Seq(RequestMessage)]
+          /\ executedOperations \in [Replica -> Seq(LogEntry)]
           /\ recievedPrepareOkOpNumber \in [Replica -> [Replica -> OpNumber]]
           /\ recoveryCount \in [Replica -> Nat]
 
@@ -133,6 +133,7 @@ RecievePrepareNEW(r) ==
              \/ /\ viewNumber[primary] = viewNumber[r]  \* Here should be "primary was in Normal status in our view and had message"
                 /\ status[primary] = Normal
           /\ opNumber[primary] > opNumber[r]
+          /\ log[primary][opNumber[r] + 1].type = RequestBlock
           /\ AddClientRequest(r, log[primary][opNumber[r] + 1].m)
     /\ UNCHANGED <<replicaViewVars, replicaExecVars, primaryVars, recoveryCount>>
 
@@ -143,14 +144,14 @@ PrepareOperationNEW(r) ==
     /\ prepared' = [prepared EXCEPT ![r] = prepared[r] + 1]
     /\ UNCHANGED <<replicaViewVars, replicaLogVars, commitNumber, executedOperations, primaryVars, recoveryCount>>
 
-ExecuteRequest(r, request) ==
-    /\ executedOperations' = [executedOperations EXCEPT ![r] = Append(executedOperations[r], request)]
+ExecuteRequest(r, entry) ==
+    /\ executedOperations' = [executedOperations EXCEPT ![r] = Append(executedOperations[r], entry)]
 
 ExecuteClientRequest(r) ==
     /\ status[r] = Normal
     /\ Len(executedOperations[r]) < commitNumber[r]
     /\ Len(log[r]) >= Len(executedOperations[r]) + 1
-    /\ ExecuteRequest(r, log[r][Len(executedOperations[r]) + 1].m)
+    /\ ExecuteRequest(r, log[r][Len(executedOperations[r]) + 1])
     /\ UNCHANGED <<replicaViewVars, replicaLogVars, commitNumber, prepared, primaryVars, recoveryCount>>
 
 AchievePrepareOkFromQuorumNEW(p) ==
@@ -172,7 +173,7 @@ CheckAchievePrepareOkFromQuorumNEW(p) ==
                         \/ recievedPrepareOkOpNumber'[p][r] >= newCommit
                         \/ r = p
           THEN /\ commitNumber' = [commitNumber EXCEPT ![p] = newCommit]
-               /\ ExecuteRequest(p, log[p][newCommit].m)
+               /\ ExecuteRequest(p, log[p][newCommit])
                /\ UNCHANGED <<prepared>>
           ELSE /\ UNCHANGED <<replicaExecVars>>
 
@@ -229,15 +230,14 @@ AchieveDoViewChangeFromQuorumNEW(p) ==
                maxN == max({opNumber[r] : r \in {r \in Q : lastNormalView[r] = maxVV}})
                maxReplica == CHOOSE r \in Q: lastNormalView[r] = maxVV /\ opNumber[r] = maxN
                newLog == log[maxReplica]
-           IN /\ log' = [log EXCEPT ![p] = newLog] \* Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])]
-              /\ opNumber' = [opNumber EXCEPT ![p] = lastOpNumber(newLog)]
+           IN /\ log' = [log EXCEPT ![p] = Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])]
+              /\ opNumber' = [opNumber EXCEPT ![p] = opNumber[maxReplica]]
               /\ commitNumber' = [commitNumber EXCEPT ![p] = max({commitNumber[r] : r \in Q})]
     /\ status' = [status EXCEPT ![p] = Normal]
     /\ lastNormalView' = [lastNormalView EXCEPT ![p] = viewNumber[p]]
     /\ UNCHANGED <<viewNumber, prepared, executedOperations, recievedPrepareOkOpNumber, recoveryCount>>
 
 RecieveStartViewNEW(r) ==
-\*    /\ status[r] = Normal
     /\ \E p \in Replica:
             /\ IsPrimary(p)
             /\ status[p] = Normal
@@ -366,5 +366,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(lo
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jan 01 19:05:31 MSK 2023 by tycoon
+\* Last modified Sun Jan 01 19:27:57 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
