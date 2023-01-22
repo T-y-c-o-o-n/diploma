@@ -33,8 +33,8 @@ CONSTANT ReplicaSequence
 
 \* State on each replica
 VARIABLES viewNumber, status, lastNormalView,
-          opNumber, log, commitNumber, prepared,
-          executedOperations
+          opNumber, log, downloadReplica,
+          commitNumber, prepared, executedOperations
 
 \* Persistant state on each replica
 VARIABLE recoveryCount
@@ -44,7 +44,7 @@ VARIABLES recievedPrepareOkOpNumber
 
 replicaViewVars == <<viewNumber, status, lastNormalView>>
 
-replicaLogVars == <<opNumber, log>>
+replicaLogVars == <<opNumber, log, downloadReplica>>
 
 replicaExecVars == <<commitNumber, prepared, executedOperations>>
 
@@ -77,6 +77,7 @@ TypeOK == /\ viewNumber \in [Replica -> View]
           /\ lastNormalView \in [Replica -> View]
           /\ opNumber \in [Replica -> Nat]
           /\ log \in [Replica -> Seq(LogEntry)]
+          /\ downloadReplica \in [Replica -> Replica \cup {None}]
           /\ commitNumber \in [Replica -> Nat]
           /\ prepared \in [Replica -> Nat]
           /\ executedOperations \in [Replica -> Seq(LogEntry)]
@@ -99,6 +100,7 @@ Init == /\ viewNumber = [r \in Replica |-> 0]
         /\ lastNormalView = [r \in Replica |-> 0]
         /\ opNumber = [r \in Replica |-> 0]
         /\ log = [r \in Replica |-> << >>]
+        /\ downloadReplica = [r \in Replica |-> None]
         /\ commitNumber = [r \in Replica |-> 0]
         /\ prepared = [r \in Replica |-> 0]
         /\ executedOperations = [r \in Replica |-> << >>]
@@ -115,31 +117,40 @@ IsPrimaryInView(r, v) == PrimaryReplicaInView(v) = r
 
 IsPrimary(r) == IsPrimaryInView(r, viewNumber[r])
 
+IsDownloadingBeforeView(r) ==
+    /\ downloadReplica[r] # None
+
 AddClientRequest(r, m) ==
     /\ opNumber' = [opNumber EXCEPT ![r] = opNumber[r] + 1]
     /\ log' = [log EXCEPT ![r] = Append(log[r], [type |-> RequestBlock, opNumber |-> opNumber'[r], m |-> m])]
 
+updateLog(r, entry) ==
+    /\ TRUE
+
 RecieveClientRequestNEW(p, op) ==
     /\ IsPrimary(p)
     /\ status[p] = Normal
+    /\ ~IsDownloadingBeforeView(p)
     /\ AddClientRequest(p, [type |-> RequestBlock, op |-> op])
-    /\ UNCHANGED <<replicaViewVars, replicaExecVars, primaryVars, recoveryCount>>
+    /\ UNCHANGED <<replicaViewVars, downloadReplica, replicaExecVars, primaryVars, recoveryCount>>
 
 RecievePrepareNEW(r) ==
     /\ ~IsPrimary(r)  \* Need this?
-    /\ status[r] = Normal
+    /\ \/ status[r] = Normal
+       \/ status[r] = ViewChange  \* fetching log from Primary till get ViewBlock
+    /\ ~IsDownloadingBeforeView(r)
     /\ LET primary == PrimaryReplicaInView(viewNumber[r])
-       IN /\ \/ viewNumber[primary] > viewNumber[r]  \* TODO it is not fully correct actually
-             \/ /\ viewNumber[primary] = viewNumber[r]  \* Here should be "primary was in Normal status in our view and had message"
-                /\ status[primary] = Normal
+       IN /\ viewNumber[primary] = viewNumber[r]  \* Here should be "primary was in Normal status in our view and had message"
+          /\ status[primary] = Normal
           /\ opNumber[primary] > opNumber[r]
           /\ log[primary][opNumber[r] + 1].type = RequestBlock
-          /\ AddClientRequest(r, log[primary][opNumber[r] + 1].m)
-    /\ UNCHANGED <<replicaViewVars, replicaExecVars, primaryVars, recoveryCount>>
+          /\ updateLog(r, log[primary][opNumber[r] + 1])
+    /\ UNCHANGED <<replicaViewVars, downloadReplica, replicaExecVars, primaryVars, recoveryCount>>
 
 PrepareOperationNEW(r) ==
     /\ ~IsPrimary(r)
     /\ status[r] = Normal
+    /\ ~IsDownloadingBeforeView(r)
     /\ prepared[r] < Len(log[r])
     /\ prepared' = [prepared EXCEPT ![r] = prepared[r] + 1]
     /\ UNCHANGED <<replicaViewVars, replicaLogVars, commitNumber, executedOperations, primaryVars, recoveryCount>>
@@ -149,12 +160,14 @@ ExecuteRequest(r, entry) ==
 
 ExecuteClientRequest(r) ==
     /\ status[r] = Normal
+    /\ ~IsDownloadingBeforeView(r)
     /\ Len(executedOperations[r]) < commitNumber[r]
     /\ Len(log[r]) >= Len(executedOperations[r]) + 1
     /\ ExecuteRequest(r, log[r][Len(executedOperations[r]) + 1])
     /\ UNCHANGED <<replicaViewVars, replicaLogVars, commitNumber, prepared, primaryVars, recoveryCount>>
 
 AchievePrepareOkFromQuorumNEW(p) ==
+    /\ ~IsDownloadingBeforeView(p)
     /\ Len(executedOperations[p]) = commitNumber[p]
     /\ LET newCommit == commitNumber[p] + 1
        IN /\ \E Q \in Quorum:
@@ -166,6 +179,7 @@ AchievePrepareOkFromQuorumNEW(p) ==
     /\ UNCHANGED <<replicaViewVars, replicaLogVars, prepared, primaryVars, recoveryCount>>
 
 CheckAchievePrepareOkFromQuorumNEW(p) ==
+    /\ ~IsDownloadingBeforeView(p)
     /\ Len(executedOperations[p]) = commitNumber[p]
     /\ LET newCommit == commitNumber[p] + 1
        IN IF /\ \E Q \in Quorum:
@@ -181,6 +195,7 @@ RecievePrepareOkNEW(p, r) ==
     /\ IsPrimary(p)
     /\ status[p] = Normal
     /\ status[r] = Normal
+    /\ ~IsDownloadingBeforeView(p)
     /\ viewNumber[r] = viewNumber[p]
     /\ prepared[r] > recievedPrepareOkOpNumber[p][r]
     /\ Len(log[p]) > recievedPrepareOkOpNumber[p][r] + 1
@@ -191,6 +206,7 @@ RecievePrepareOkNEW(p, r) ==
 RecieveCommitNEW(r) ==
     /\ ~IsPrimary(r)  \* Need this?
     /\ status[r] = Normal
+    /\ ~IsDownloadingBeforeView(r)
     /\ \E p \in Replica:
         /\ viewNumber[r] = viewNumber[p]
         /\ IsPrimary(p)
@@ -203,21 +219,29 @@ RecieveCommitNEW(r) ==
 
 (* View Changing *)
 
+\* -> E1
 TimeoutStartViewChangingNEW(r) ==
     /\ status[r] = Normal
+    /\ downloadReplica' = [downloadReplica EXCEPT ![r] = None]
     /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[r] + 1]
     /\ status' = [status EXCEPT ![r] = ViewChange]
-    /\ UNCHANGED <<lastNormalView, replicaLogVars, replicaExecVars, primaryVars, recoveryCount>>
+    /\ UNCHANGED <<lastNormalView, log, opNumber, replicaExecVars, primaryVars, recoveryCount>>
 
+\* -> E1
 RecieveStartViewChangeNEW(r) ==
     /\ status[r] = Normal
+    /\ downloadReplica' = [downloadReplica EXCEPT ![r] = None]
     /\ \E r2 \in Replica:
         /\ viewNumber[r2] > viewNumber[r]
+        /\ status[r2] = ViewChange
         /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[r2]]
         /\ status' = [status EXCEPT ![r] = ViewChange]
-    /\ UNCHANGED <<lastNormalView, replicaLogVars, replicaExecVars, primaryVars, recoveryCount>>
+    /\ UNCHANGED <<lastNormalView, log, opNumber, replicaExecVars, primaryVars, recoveryCount>>
+
+\* TODO: ADD ->Er and ->Em states and transitions
 
 \* Become Primary
+\* Em -> Mc
 AchieveDoViewChangeFromQuorumNEW(p) ==
     /\ IsPrimary(p)
     /\ status[p] = ViewChange
@@ -229,29 +253,62 @@ AchieveDoViewChangeFromQuorumNEW(p) ==
         /\ LET maxVV == max({lastNormalView[r] : r \in Q})
                maxN == max({opNumber[r] : r \in {r \in Q : lastNormalView[r] = maxVV}})
                maxReplica == CHOOSE r \in Q: lastNormalView[r] = maxVV /\ opNumber[r] = maxN
-               newLog == log[maxReplica]
-           IN /\ log' = [log EXCEPT ![p] = Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])]
+               \* newLog == log[maxReplica]
+           IN /\ downloadReplica' = [downloadReplica EXCEPT ![p] = maxReplica] \* log' = [log EXCEPT ![p] = newLog]
               /\ opNumber' = [opNumber EXCEPT ![p] = opNumber[maxReplica]]
               /\ commitNumber' = [commitNumber EXCEPT ![p] = max({commitNumber[r] : r \in Q})]
     /\ status' = [status EXCEPT ![p] = Normal]
     /\ lastNormalView' = [lastNormalView EXCEPT ![p] = viewNumber[p]]
     /\ UNCHANGED <<viewNumber, prepared, executedOperations, recievedPrepareOkOpNumber, recoveryCount>>
 
+\* Mc -> Mc / Mc -> M
+MasterDownloadBeforeView(p) ==
+    /\ IsPrimary(p)
+    /\ status[p] = Normal
+    /\ IsDownloadingBeforeView(p)
+    /\ Len(log[p]) < opNumber[p]
+    /\ LET newEntry == log[downloadReplica[p]][Len(log[p]) + 1]
+       IN \/ /\ log' = [log EXCEPT ![p] = Append(log[p], newEntry)]
+             /\ Len(log'[p]) = opNumber[p]
+             /\ opNumber' = [opNumber EXCEPT ![p] = opNumber[p] + 1]
+             /\ downloadReplica' = [downloadReplica EXCEPT ![p] = None]
+          \/ /\ log' = [log EXCEPT ![p] = Append(Append(log[p], newEntry), [type |-> ViewBlock, view |-> viewNumber[p]])]
+             /\ UNCHANGED <<opNumber, downloadReplica>>
+    /\ UNCHANGED <<replicaViewVars, replicaExecVars, primaryVars, recoveryCount>>
+
+\* Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])
+
+\* Er -> Rc
+\* TODO: setup download up to View metablock
 RecieveStartViewNEW(r) ==
     /\ \E p \in Replica:
             /\ IsPrimary(p)
             /\ status[p] = Normal
+            /\ ~IsDownloadingBeforeView(p)
             /\ \/ viewNumber[p] > viewNumber[r]
                \/ /\ viewNumber[p] = viewNumber[r]
                   /\ status[r] = ViewChange
-            /\ log' = [log EXCEPT ![r] = log[p]]
-            /\ opNumber' = [opNumber EXCEPT ![r] = opNumber[p]]
+            /\ downloadReplica' = [downloadReplica EXCEPT ![r] = p]
             /\ viewNumber' = [viewNumber EXCEPT ![r] = viewNumber[p]]
             /\ status' = [status EXCEPT ![r] = Normal]
             /\ lastNormalView' = [lastNormalView EXCEPT ![r] = viewNumber'[r]]
             /\ commitNumber' = [commitNumber EXCEPT ![r] = commitNumber[p]]
             /\ prepared' = [prepared EXCEPT ![r] = commitNumber[p]]
-    /\ UNCHANGED <<executedOperations, primaryVars, recoveryCount>>
+    /\ UNCHANGED <<executedOperations, log, opNumber, primaryVars, recoveryCount>>
+
+\* Rc -> Rc / Rc -> R
+ReplicaDownloadBeforeView(r) ==
+    /\ ~IsPrimary(r)
+    /\ status[r] = Normal
+    /\ IsDownloadingBeforeView(r)
+    /\ Len(log[r]) < opNumber[r]
+    /\ LET newEntry == log[downloadReplica[r]][Len(log[r]) + 1]
+       IN /\ log' = [log EXCEPT ![r] = Append(log[r], newEntry)]
+          /\ opNumber' = [opNumber EXCEPT ![r] = opNumber[r] + 1]
+          /\ \/ /\ newEntry = [type |-> ViewBlock, view |-> viewNumber[r]]  \* Have just downloaded View meta Block 
+                /\ downloadReplica' = [downloadReplica EXCEPT ![r] = None]
+             \/ /\ UNCHANGED <<downloadReplica>>
+    /\ UNCHANGED <<replicaViewVars, replicaExecVars, primaryVars, recoveryCount>>
 
 -----------------------------------------------------------------------------
 
@@ -366,5 +423,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(lo
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Jan 01 19:27:57 MSK 2023 by tycoon
+\* Last modified Sat Jan 21 23:23:38 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
