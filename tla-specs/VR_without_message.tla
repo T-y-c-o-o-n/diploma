@@ -173,7 +173,7 @@ AddClientRequest(r, m) ==
     /\ replicaState' = [replicaState EXCEPT ![r].opNumber = @ + 1,
                                             ![r].log = Append(@, [
                                                 type |-> RequestBlock,
-                                                opNumber |-> replicaState[r].opNumber,
+                                                opNumber |-> replicaState[r].opNumber',
                                                 m |-> m
                                               ])]
 
@@ -478,5 +478,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 09 19:32:18 MSK 2023 by tycoon
+\* Last modified Thu Feb 09 19:38:00 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
