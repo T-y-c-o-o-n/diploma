@@ -63,8 +63,8 @@ View == Nat
 
 RequestMessage == [type: {Request}, op: Operation]
 
-LogEntry == [type: RequestBlock, opNumber: Nat, m: RequestMessage]
-       \cup [type: ViewBlock, view: View]
+LogEntry == [type: {RequestBlock}, opNumber: Nat, m: RequestMessage]
+       \cup [type: {ViewBlock}, view: View]
 
 \* All possible messages
 Message == [type: {Recovery}, i: Replica, x: Nat]
@@ -181,7 +181,7 @@ RecieveClientRequest(p, op) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
     /\ ~IsDownloadingBeforeView(p)
-    /\ AddClientRequest(p, [type |-> RequestBlock, op |-> op])
+    /\ AddClientRequest(p, [type |-> Request, op |-> op])
     /\ UNCHANGED <<recoveryCount>>
 
 RecievePrepare(r) ==
@@ -480,5 +480,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Thu Feb 16 20:08:04 MSK 2023 by tycoon
+\* Last modified Fri Feb 17 11:50:46 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
