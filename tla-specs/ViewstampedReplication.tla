@@ -84,9 +84,9 @@ Message == [type: {Prepare}, v: Nat, m: RequestMessage, n: Nat, k: Nat]
       \cup [type: {PrepareOk}, v: Nat, n: Nat, i: Replica]
       \cup [type: {Commit}, v: Nat, k: Nat]
       \cup [type: {StartViewChange}, v: Nat, i: Replica]
-      \cup [type: {DoViewChange}, v: Nat, l: Seq(LogEntry), vv: Nat,
+      \cup [type: {DoViewChange}, v: Nat, vv: Nat,
             n: Nat, k: Nat, i: Replica]
-      \cup [type: {StartView}, v: Nat, l: Seq(LogEntry), n: Nat, k: Nat]
+      \cup [type: {StartView}, v: Nat, n: Nat, k: Nat]
       \cup [type: {Recovery}, i: Replica, x: Nat]
       \cup [type: {RecoveryResponse}, v: Nat, x: Nat, l: Seq(LogEntry) \cup {None},
             n: Nat \cup {None}, k: Nat \cup {None}, i: Replica, j: Replica]
@@ -107,13 +107,11 @@ TypeOK == /\ recoveryCount \in [Replica -> Nat]
                 viewNumber: Nat,
                 status: Statuses,
                 lastNormalView: Nat,
-                opNumber: Nat,
+\*                opNumber: Nat,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
                 commitNumber: Nat,
-                prepared: Nat,
-                executedOperations: Seq(LogEntry),
-                recievedPrepareOkOpNumber: [Replica -> Nat]
+                executedOperations: Seq(LogEntry)
               ]
             ]
           /\ recoveryCount \in [Replica -> Nat]
@@ -151,13 +149,11 @@ Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
                     lastNormalView |-> 0,
-                    opNumber |-> 0,
+\*                    opNumber |-> 0,
                     log |-> << >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
-                    prepared |-> 0,
-                    executedOperations |-> << >>,
-                    recievedPrepareOkOpNumber |-> [r1 \in Replica |-> 0]
+                    executedOperations |-> << >>
                 ]
            ]
         /\ recoveryCount = [r \in Replica |-> 0]
@@ -186,19 +182,19 @@ ViewNumber(r) == replicaState[r].viewNumber
 
 Status(r) == replicaState[r].status
 
-LastNormalView(r) == replicaState[r].lastNormalView
-
-OpNumber(r) == replicaState[r].commitNumber
+LastNormalView(r) == replicaState[r].lastNormalView 
 
 Log(r) == replicaState[r].log
 
 LogLen(r) == Len(Log(r))
 
+OpNumber(r) == LogLen(r)
+
+NewOpNumber(r) == Len(Log(r)')
+
 DownloadReplica(r) == replicaState[r].downloadReplica
 
 CommitNumber(r) == replicaState[r].commitNumber
-
-Prepared(r) == replicaState[r].prepared
 
 ExecutedOperations(r) == replicaState[r].executedOperations
 
@@ -218,10 +214,9 @@ IsDownloadingBeforeView(r) ==
     /\ replicaState[r].downloadReplica # None
 
 AddClientRequest(r, m) ==
-    /\ replicaState' = [replicaState EXCEPT ![r].opNumber = @ + 1,
-                                            ![r].log = Append(@, [
+    /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [
                                                 type |-> RequestBlock,
-                                                opNumber |-> replicaState[r].opNumber',
+                                                opNumber |-> OpNumber(r) + 1,
                                                 m |-> m
                                               ])]
 
@@ -232,8 +227,8 @@ RecieveClientRequest(p, op) ==
     /\ ~IsDownloadingBeforeView(p)
     /\ AddClientRequest(p, [type |-> Request, op |-> op])
     /\ Send([type |-> Prepare,
-             v |-> ViewNumber(p), m |-> Log(p)[replicaState[p].opNumber'].m,
-             n |-> replicaState[p].opNumber', k |-> CommitNumber(p)])
+             v |-> ViewNumber(p), m |-> Log(p)'[OpNumber(p) + 1].m,
+             n |-> OpNumber(p) + 1, k |-> CommitNumber(p)])
     /\ UNCHANGED <<recoveryCount>>
 
 RecievePrepare(r, m) ==
@@ -244,8 +239,11 @@ RecievePrepare(r, m) ==
     /\ m.v = ViewNumber(r)
     /\ m.n = OpNumber(r) + 1
     /\ AddClientRequest(r, m.m)
-    /\ UNCHANGED <<recoveryCount, msgs>>
+    /\ Send([(*src |-> r, dst |-> PrimaryReplicaInView(viewNumber[r]), *)type |-> PrepareOk,
+             v |-> ViewNumber(r), n |-> m.n, i |-> r])
+    /\ UNCHANGED <<recoveryCount>>
 
+(*
 PrepareOperation(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
@@ -255,6 +253,7 @@ PrepareOperation(r) ==
     /\ Send([(*src |-> r, dst |-> PrimaryReplicaInView(viewNumber[r]), *)type |-> PrepareOk,
              v |-> ViewNumber(r), n |-> Log(r)[replicaState[r].prepared'].opNumber, i |-> r])
     /\ UNCHANGED <<recoveryCount>>
+*)
 
 ExecuteRequest(r, entry) ==
     /\ replicaState' = [replicaState EXCEPT ![r].executedOperations = Append(@, entry)]
@@ -264,7 +263,7 @@ ExecuteClientRequest(r) ==
     /\ ~IsDownloadingBeforeView(r)
     /\ Len(ExecutedOperations(r)) < CommitNumber(r)
     /\ Len(ExecutedOperations(r)) < LogLen(r)
-    /\ ExecuteRequest(r, Log(r)[Len(ExecutedOperations(r)) + 1].m)
+    /\ ExecuteRequest(r, Log(r)[Len(ExecutedOperations(r)) + 1])
     /\ UNCHANGED <<recoveryCount, msgs>>
 
 AchievePrepareOkFromQuorum(p) ==
@@ -274,7 +273,7 @@ AchievePrepareOkFromQuorum(p) ==
     /\ LET newCommit == CommitNumber(p) + 1
        IN /\ \E Q \in Quorum:
                  \A r \in Q:
-                     \/ RecievedPrepareOkOpNumber(p)[r] >= newCommit
+                     \/ Q \subseteq {r} \cup {m.i : m \in {m \in msgs: m.type = PrepareOk /\ m.v = ViewNumber(p) /\ m.n >= newCommit}}
                      \/ r = p
           /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit,
                                                   ![p].executedOperations = Append(@, Log(p)[newCommit])]  \* ExecuteRequest(p, Log(p)[newCommit])
@@ -296,7 +295,7 @@ CheckAchievePrepareOkFromQuorum(p, m) ==
           ELSE /\ Drop(m)
                /\ UNCHANGED <<replicaExecVars>>
 *)
-
+(*
 RecievePrepareOk(p, m) ==
     /\ m.type = PrepareOk
     /\ p # m.i
@@ -306,10 +305,13 @@ RecievePrepareOk(p, m) ==
     /\ \/ \* stale prepareOkMessage
           /\ m.n <= RecievedPrepareOkOpNumber(p)[m.i]
           /\ Drop(m)
+          /\ UNCHANGED <<replicaState>>
        \/ \*
           /\ m.n > RecievedPrepareOkOpNumber(p)[m.i]
           /\ replicaState' = [replicaState EXCEPT ![p].recievedPrepareOkOpNumber[m.i] = m.n]  \* in NoMsg just +1
+          /\ UNCHANGED <<msgs>>
     /\ UNCHANGED <<recoveryCount>>
+*)
 
 RecieveCommit(r, m) ==
     /\ ~IsPrimary(r)  \* Need this?
@@ -334,10 +336,9 @@ TimeoutStartViewChanging(r) ==
 
 CheckAchieveStartViewChangeFromQuorum(r, v) ==
     /\ IF \E Q \in Quorum: /\ r \in Q
-                           /\ Q = replicaState[r].recievedStartViewChange' \cup {r}
+                           /\ Q = {r} \cup {m.i : m \in {m \in msgs: m.type = StartViewChange /\ m.v = ViewNumber(r)'}}
        THEN Send([(*src |-> r, dst |-> PrimaryReplicaInView(m.v),*)
-                  type |-> DoViewChange, v |-> v,
-                  l |-> Log(r), vv |-> LastNormalView(r),
+                  type |-> DoViewChange, v |-> v, vv |-> LastNormalView(r),
                   n |-> OpNumber(r), k |-> CommitNumber(r), i |-> r])
        ELSE UNCHANGED <<msgs>>
 
@@ -347,22 +348,20 @@ RecieveStartViewChange(r, m) ==
           /\ ViewNumber(r) < m.v
           /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
                                                   ![r].viewNumber = m.v,
-                                                  ![r].status = ViewChange,
-                                                  ![r].recievedStartViewChange = {m.i}]
+                                                  ![r].status = ViewChange]
           /\ CheckAchieveStartViewChangeFromQuorum(r, m.v)
        \/ \* Our view number
           /\ ViewNumber(r) = m.v
           /\ Status(r) = ViewChange
           /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
                                                   ![r].viewNumber = m.v,
-                                                  ![r].status = ViewChange,
-                                                  ![r].recievedStartViewChange = @ \cup {m.i}]
+                                                  ![r].status = ViewChange]
           /\ CheckAchieveStartViewChangeFromQuorum(r, m.v)
        \/ \* Stale view
           /\ \/ ViewNumber(r) > m.v
              \/ /\ ViewNumber(r) = m.v
                 /\ Status(r) = Normal
-          /\ UNCHANGED <<msgs>>
+          /\ UNCHANGED <<replicaState, msgs>>
     /\ UNCHANGED <<recoveryCount>>
 
 RecieveDoViewChange(p, m) ==
@@ -372,36 +371,51 @@ RecieveDoViewChange(p, m) ==
           /\ ViewNumber(p) < m.v
           /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = None,
                                                   ![p].viewNumber = m.v,
-                                                  ![p].status = ViewChange,
-                                                  ![p].recievedDoViewChangeMsgs = {m}]
+                                                  ![p].status = ViewChange]
        \/ \* Our view number
           /\ ViewNumber(p) = m.v
           /\ Status(p) = ViewChange
-          /\ replicaState' = [replicaState EXCEPT ![p].recievedDoViewChangeMsgs = @ \cup {m}]
+          /\ UNCHANGED <<replicaState>>
        \/ \* Stale message
           /\ ViewNumber(p) > m.v
+          /\ UNCHANGED <<replicaState>>
     /\ Drop(m)
     /\ UNCHANGED <<recoveryCount>>
 
 \* Become Primary
 AchieveDoViewChangeFromQuorum(p) ==
     /\ Status(p) = ViewChange
-    /\ \E Q \in Quorum: /\ p \in Q
-                        /\ Q \subseteq {m.i : m \in replicaState[p].recievedDoViewChangeMsgs}
-    /\ LET maxVV == Max({m.vv : m \in replicaState[p].recievedDoViewChangeMsgs})
-           maxN == Max({m.n : m \in {m \in replicaState[p].recievedDoViewChangeMsgs : m.vv = maxVV}})
-           maxMsg == CHOOSE m \in replicaState[p].recievedDoViewChangeMsgs: m.vv = maxVV /\ m.n = maxN
-           newLog == maxMsg.l
-       IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxMsg.i,
-                                                  ![p].commitNumber = Max({m.k : m \in replicaState[p].recievedDoViewChangeMsgs}),
-                                                  ![p].status = Normal,
-                                                  ![p].lastNormalView = ViewNumber(p),
-                                                  ![p].recievedStartViewChange = {},
-                                                  ![p].recievedDoViewChangeMsgs = {}]
-    /\ Send([type |-> StartView,
-             v |-> ViewNumber(p),
-             n |-> replicaState[p].opNumber',
-             k |-> replicaState[p].commitNumber'])
+    /\ LET recieved == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p)}
+       IN /\ \E Q \in Quorum: /\ p \in Q
+                              /\ Q \subseteq {p} \cup {m.i : m \in recieved}
+          /\ LET maxVV == Max({m.vv : m \in recieved})
+                 maxN == Max({m.n : m \in {m \in recieved : m.vv = maxVV}})
+                 maxMsg == CHOOSE m \in recieved: m.vv = maxVV /\ m.n = maxN
+                 newLog == maxMsg.l
+             IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxMsg.i,
+                                                        ![p].commitNumber = Max({m.k : m \in recieved}),
+                                                        ![p].status = Normal,
+                                                        ![p].lastNormalView = ViewNumber(p)]
+    /\ UNCHANGED <<recoveryCount, msgs>>
+
+\* TODO: add messages for downloading
+\* Mc -> Mc / Mc -> M
+MasterDownloadBeforeView(p) ==
+    /\ IsPrimary(p)
+    /\ Status(p) = Normal
+    /\ IsDownloadingBeforeView(p)
+    /\ ViewNumber(p) = ViewNumber(DownloadReplica(p))  \* If replica will increase view, then this Primary could only start view changing
+    /\ LogLen(p) < LogLen(DownloadReplica(p))
+    /\ LET newEntry == Log(DownloadReplica(p))[LogLen(p) + 1]
+       IN \/ /\ LogLen(p) + 1 = LogLen(DownloadReplica(p))
+             /\ replicaState' = [replicaState EXCEPT ![p].log = Append(Append(@, newEntry), [type |-> ViewBlock, view |-> ViewNumber(p)]),
+                                                     ![p].downloadReplica = None]
+             /\ Send([type |-> StartView,
+                      v |-> ViewNumber(p),
+                      n |-> OpNumber(p)',
+                      k |-> replicaState[p].commitNumber'])
+          \/ /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, newEntry)]
+             /\ UNCHANGED <<msgs>>
     /\ UNCHANGED <<recoveryCount>>
 
 RecieveStartView(r, m) ==
@@ -410,13 +424,29 @@ RecieveStartView(r, m) ==
        \/ /\ ViewNumber(r) = m.v
           /\ Status(r) = ViewChange
     /\ replicaState' = [replicaState EXCEPT ![r].log = SubSeq(Log(r), 1, Min({LogLen(r), m.k})),
-                                            ![r].downloadReplica = m.i,
+                                            ![r].downloadReplica = PrimaryReplicaInView(m.v),
                                             ![r].viewNumber = m.v,
                                             ![r].status = Normal,
                                             ![r].lastNormalView = ViewNumber(r),
                                             ![r].commitNumber = m.k,
                                             ![r].prepared = m.k]
     /\ UNCHANGED <<recoveryCount, msgs>>
+
+\* TODO: add messages for downloading
+\* Rc -> Rc / Rc -> R
+ReplicaDownloadBeforeView(r) ==
+    /\ ~IsPrimary(r)
+    /\ Status(r) = Normal
+    /\ IsDownloadingBeforeView(r)
+    /\ IF LogLen(DownloadReplica(r)) <= LogLen(r)
+       THEN /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None]
+       ELSE LET newEntry == Log(DownloadReplica(r))[LogLen(r) + 1]
+            IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, newEntry),
+                                                       ![r].downloadReplica =
+                                                            IF newEntry = [type |-> ViewBlock, view |-> ViewNumber(r)]  \* Have just downloaded View meta Block 
+                                                            THEN None
+                                                            ELSE @]
+    /\ UNCHANGED <<recoveryCount>>
 
 -----------------------------------------------------------------------------
 
@@ -426,14 +456,9 @@ ReplicaCrash(r) ==
     /\ replicaState' = [replicaState EXCEPT ![r].status = Recovering,
                                             ![r].viewNumber = 0,
                                             ![r].lastNormalView = 0,
-                                            ![r].opNumber = 0,
                                             ![r].log = << >>,
                                             ![r].commitNumber = 0,
-                                            ![r].prepared = 0,
                                             ![r].executedOperations = << >>,
-                                            ![r].recievedPrepareOkOpNumber = [r2 \in Replica |-> 0],
-                                            ![r].recievedStartViewChange = {},
-                                            ![r].recievedDoViewChangeMsgs = {},
                                             ![r].downloadReplica = None]
     /\ recoveryCount' = [recoveryCount EXCEPT ![r] = recoveryCount[r] + 1]
     /\ Send([type |-> Recovery, i |-> r, x |-> recoveryCount'[r]])
@@ -461,7 +486,6 @@ AchieveRecoveryResponseFromQuorum(r) ==
               /\ replicaState' = [replicaState EXCEPT ![r].status = Normal,
                                                       ![r].viewNumber = maxView,
                                                       ![r].log = newLog,
-                                                      ![r].opNumber = newOpNumber,
                                                       ![r].lastNormalView = maxView,
                                                       ![r].commitNumber = newCommitNumber]
               /\ UNCHANGED <<recoveryCount, msgs>>
@@ -471,13 +495,14 @@ AchieveRecoveryResponseFromQuorum(r) ==
 
 Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
-        \/ \E r \in Replica: PrepareOperation(r)
-        \/ \E p \in Replica, m \in msgs: RecievePrepareOk(p, m)
+\*        \/ \E r \in Replica: PrepareOperation(r)
+\*        \/ \E p \in Replica, m \in msgs: RecievePrepareOk(p, m)
+        \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
         \/ \E r \in Replica: ExecuteClientRequest(r)
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
         \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
-\*        \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
+        \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
         \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
         \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
         \/ \E r \in Replica: ReplicaCrash(r)
@@ -494,13 +519,13 @@ EventuallyRecievePrepare == \A r \in Replica: WF_vars(\E m \in msgs: RecievePrep
 
 EventuallyRecieveCommit == \A r \in Replica: WF_vars(\E m \in msgs: RecieveCommit(r, m))
 
-EventuallyRecievePrepareOk == \A p \in Replica: WF_vars(\E m \in msgs: RecievePrepareOk(p, m))
+\*EventuallyRecievePrepareOk == \A p \in Replica: WF_vars(\E m \in msgs: RecievePrepareOk(p, m))
 
 LivenessSpec ==
     /\ EventuallyRecieveClientRequest
     /\ EventuallyRecievePrepare
     /\ EventuallyRecieveCommit
-    /\ EventuallyRecievePrepareOk
+\*    /\ EventuallyRecievePrepareOk
 
 -----------------------------------------------------------------------------
 
@@ -537,5 +562,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Feb 17 13:01:16 MSK 2023 by tycoon
+\* Last modified Wed Feb 22 17:48:52 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
