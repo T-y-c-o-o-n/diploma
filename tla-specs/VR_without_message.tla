@@ -77,7 +77,6 @@ TypeOK == /\ recoveryCount \in [Replica -> Nat]
                 viewNumber: View,
                 status: Statuses,
                 lastNormalView: View,
-                opNumber: Nat,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
                 commitNumber: Nat,
@@ -114,7 +113,7 @@ Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
                     lastNormalView |-> 0,
-                    opNumber |-> 0,
+\*                    opNumber |-> 0,
                     log |-> << >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
@@ -142,11 +141,11 @@ Status(r) == replicaState[r].status
 
 LastNormalView(r) == replicaState[r].lastNormalView
 
-OpNumber(r) == replicaState[r].commitNumber
-
 Log(r) == replicaState[r].log
 
 LogLen(r) == Len(Log(r))
+
+OpNumber(r) == LogLen(r)
 
 DownloadReplica(r) == replicaState[r].downloadReplica
 
@@ -170,10 +169,9 @@ IsDownloadingBeforeView(r) ==
     /\ replicaState[r].downloadReplica # None
 
 AddClientRequest(r, m) ==
-    /\ replicaState' = [replicaState EXCEPT ![r].opNumber = @ + 1,
-                                            ![r].log = Append(@, [
+    /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [
                                                 type |-> RequestBlock,
-                                                opNumber |-> replicaState[r].opNumber + 1,
+                                                opNumber |-> OpNumber(r) + 1,
                                                 m |-> m
                                               ])]
 
@@ -319,10 +317,8 @@ MasterDownloadBeforeView(p) ==
     /\ LET newEntry == Log(DownloadReplica(p))[LogLen(p) + 1]
        IN \/ /\ LogLen(p) + 1 = LogLen(DownloadReplica(p))
              /\ replicaState' = [replicaState EXCEPT ![p].log = Append(Append(@, newEntry), [type |-> ViewBlock, view |-> ViewNumber(p)]),
-                                                     ![p].opNumber = @ + 1,
                                                      ![p].downloadReplica = None]
-          \/ /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, newEntry),
-                                                     ![p].opNumber = @ + 1]
+          \/ /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, newEntry)]
     /\ UNCHANGED <<recoveryCount>>
 
 \* Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])
@@ -355,7 +351,6 @@ ReplicaDownloadBeforeView(r) ==
        THEN /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None]
        ELSE LET newEntry == Log(DownloadReplica(r))[LogLen(r) + 1]
             IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, newEntry),
-                                                       ![r].opNumber = @ + 1,
                                                        ![r].downloadReplica =
                                                             IF newEntry = [type |-> ViewBlock, view |-> ViewNumber(r)]  \* Have just downloaded View meta Block 
                                                             THEN None
@@ -370,7 +365,6 @@ ReplicaCrash(r) ==
     /\ replicaState' = [replicaState EXCEPT ![r].status = Recovering,
                                             ![r].viewNumber = 0,
                                             ![r].lastNormalView = 0,
-                                            ![r].opNumber = 0,
                                             ![r].log = << >>,
                                             ![r].commitNumber = 0,
                                             ![r].prepared = 0,
@@ -402,7 +396,6 @@ AchieveRecoveryResponseFromQuorum(r) ==
                  /\ replicaState' = [replicaState EXCEPT ![r].status = Normal,
                                                          ![r].viewNumber = maxView,
                                                          ![r].log = newLog,
-                                                         ![r].opNumber = newOpNumber,
                                                          ![r].lastNormalView = maxView,
                                                          ![r].commitNumber = newCommitNumber]
                  /\ UNCHANGED <<recoveryCount>>
@@ -480,5 +473,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Feb 17 11:50:46 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 17:22:11 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
