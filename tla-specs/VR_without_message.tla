@@ -80,7 +80,6 @@ TypeOK == /\ recoveryCount \in [Replica -> Nat]
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
                 commitNumber: Nat,
-                prepared: Nat,
                 executedOperations: Seq(LogEntry)
               ]
             ]
@@ -112,11 +111,9 @@ Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
                     lastNormalView |-> 0,
-\*                    opNumber |-> 0,
                     log |-> << [type |-> ViewBlock, view |-> 0] >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
-                    prepared |-> 0,
                     executedOperations |-> << >>
                 ]
            ]
@@ -149,8 +146,6 @@ DownloadReplica(r) == replicaState[r].downloadReplica
 
 CommitNumber(r) == replicaState[r].commitNumber
 
-Prepared(r) == replicaState[r].prepared
-
 ExecutedOperations(r) == replicaState[r].executedOperations
 
 ExecuteOperation(op) == op
@@ -178,18 +173,28 @@ RecieveClientRequest(p, op) ==
     /\ AddClientRequest(p, [type |-> Request, op |-> op])
     /\ UNCHANGED <<recoveryCount>>
 
+FirstIndexOfViewBlock(log, v) == Min({Len(log) + 1} \cup {i \in 1 .. Len(log) : log[i].type = ViewBlock /\ log[i].view >= v})
+
+MaxLogEntryInView(log, v) == LET first == FirstIndexOfViewBlock(log, v)
+                             IN IF /\ first <= Len(log)
+                                   /\ log[first].view = v
+                                THEN FirstIndexOfViewBlock(log, v + 1) - 1
+                                ELSE 0
+
 RecievePrepare(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ ~IsDownloadingBeforeView(r)
     /\ LET primary == PrimaryReplicaInView(ViewNumber(r))
-       IN /\ ViewNumber(primary) = ViewNumber(r)  \* Here should be "primary was in Normal status in our view and had message"
-          /\ Status(primary) = Normal
+       IN \* /\ ViewNumber(primary) = ViewNumber(r)  \* Here should be "primary was in Normal status in our view and had message"
+          \* /\ Status(primary) = Normal
+          /\ MaxLogEntryInView(Log(primary), ViewNumber(r)) > LogLen(r)
           /\ LogLen(primary) > LogLen(r)
           /\ Log(primary)[LogLen(r) + 1].type = RequestBlock
           /\ AddClientRequest(r, Log(primary)[LogLen(r) + 1].m)
     /\ UNCHANGED <<recoveryCount>>
 
+(*
 PrepareOperation(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
@@ -197,6 +202,7 @@ PrepareOperation(r) ==
     /\ Prepared(r) < Len(Log(r))
     /\ replicaState' = [replicaState EXCEPT ![r].prepared = @ + 1]
     /\ UNCHANGED <<recoveryCount>>
+*)
 
 ExecuteRequest(r, entry) ==
     /\ replicaState' = [replicaState EXCEPT ![r].executedOperations = Append(@, entry)]
@@ -208,14 +214,6 @@ ExecuteClientRequest(r) ==
     /\ Len(ExecutedOperations(r)) < Len(Log(r))
     /\ ExecuteRequest(r, Log(r)[Len(ExecutedOperations(r)) + 1])
     /\ UNCHANGED <<recoveryCount>>
-
-FirstIndexOfViewBlock(log, v) == Min({Len(log) + 1} \cup {i \in 1 .. Len(log) : log[i].type = ViewBlock /\ log[i].view >= v})
-
-MaxLogEntryInView(log, v) == LET first == FirstIndexOfViewBlock(log, v)
-                             IN IF /\ first <= Len(log)
-                                   /\ log[first].view = v
-                                THEN FirstIndexOfViewBlock(log, v + 1) - 1
-                                ELSE 0
 
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
@@ -264,11 +262,10 @@ RecieveCommit(r) ==
     /\ Status(r) = Normal
     /\ ~IsDownloadingBeforeView(r)
     /\ \E p \in Replica:
-        /\ ViewNumber(r) = ViewNumber(p)
-        /\ IsPrimary(p)
+        /\ IsPrimaryInView(p, ViewNumber(r))        
         /\ CommitNumber(p) > CommitNumber(r)
-        \* TODO:set any possible value between commitNumber[r] and commitNumber[r2]
-        /\ replicaState' = [replicaState EXCEPT ![r].commitNumber = CommitNumber(p)] 
+        /\ \E newCommit \in CommitNumber(r) .. LogLen(r):
+               replicaState' = [replicaState EXCEPT ![r].commitNumber = newCommit] 
     /\ UNCHANGED <<recoveryCount>>
 
 -----------------------------------------------------------------------------
@@ -347,8 +344,7 @@ RecieveStartView(r) ==
                                                     ![r].viewNumber = ViewNumber(p),
                                                     ![r].status = Normal,
                                                     ![r].lastNormalView = ViewNumber(p),
-                                                    ![r].commitNumber = CommitNumber(p),
-                                                    ![r].prepared = CommitNumber(p)]
+                                                    ![r].commitNumber = CommitNumber(p)]
     /\ UNCHANGED <<recoveryCount>>
 
 \* Rc -> Rc / Rc -> R
@@ -412,11 +408,11 @@ AchieveRecoveryResponseFromQuorum(r) ==
 
 Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica: RecievePrepare(r)
-        \/ \E r \in Replica: PrepareOperation(r)
-\*        \/ \E p, r \in Replica: RecievePrepareOk(p, r)
+\*        \/ \E r \in Replica: PrepareOperation(r)
         \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica: RecieveCommit(r)
         \/ \E r \in Replica: ExecuteClientRequest(r)
+(*
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
         \/ \E r \in Replica: RecieveStartViewChange(r)
         \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
@@ -425,7 +421,7 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica: AchieveRecoveryResponseFromQuorum(r)
         \/ \E p \in Replica: MasterDownloadBeforeView(p)
         \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
-
+*)
 -----------------------------------------------------------------------------
 
 (* Liveness *)
@@ -480,5 +476,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Mar 06 18:24:10 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 19:44:20 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon

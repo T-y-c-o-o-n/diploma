@@ -107,7 +107,6 @@ TypeOK == /\ recoveryCount \in [Replica -> Nat]
                 viewNumber: Nat,
                 status: Statuses,
                 lastNormalView: Nat,
-\*                opNumber: Nat,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
                 commitNumber: Nat,
@@ -250,6 +249,7 @@ ExecuteClientRequest(r) ==
 
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
+    /\ Status(p) = Normal
     /\ ~IsDownloadingBeforeView(p)
     /\ Len(ExecutedOperations(p)) = CommitNumber(p)
     /\ LET newCommit == CommitNumber(p) + 1
@@ -459,10 +459,10 @@ AchieveRecoveryResponseFromQuorum(r) ==
 Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
         \/ \E r \in Replica: PrepareOperation(r)
-\*        \/ \E p \in Replica, m \in msgs: RecievePrepareOk(p, m)
         \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
         \/ \E r \in Replica: ExecuteClientRequest(r)
+(*
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
         \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
         \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
@@ -473,7 +473,7 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica: ReplicaCrash(r)
         \/ \E r \in Replica, m \in msgs: RecoveryReceive(r, m)
         \/ \E r \in Replica: AchieveRecoveryResponseFromQuorum(r)
-
+*)
 -----------------------------------------------------------------------------
 
 (* Liveness *)
@@ -497,6 +497,10 @@ LivenessSpec ==
 (* Full Spec *)
 
 Spec == Init /\ [][Next]_vars \* /\ LivenessSpec
+
+-----------------------------------------------------------------------------
+
+VRNoMsgs == INSTANCE VR_without_message
 
 -----------------------------------------------------------------------------
 
@@ -527,5 +531,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Mar 06 18:26:41 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 19:36:18 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
