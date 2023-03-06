@@ -149,7 +149,6 @@ Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
                     lastNormalView |-> 0,
-\*                    opNumber |-> 0,
                     log |-> << >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
@@ -158,21 +157,6 @@ Init == /\ replicaState = [r \in Replica |-> [
            ]
         /\ recoveryCount = [r \in Replica |-> 0]
         /\ msgs = {}
-        (*/\ viewNumber = [r \in Replica |-> 0]
-        /\ status = [r \in Replica |-> Normal]
-        /\ lastNormalView = [r \in Replica |-> 0]
-\*        /\ sentStartViewChange = [r \in Replica |-> {}]
-        /\ recievedStartViewChange = [r \in Replica |-> {}]
-        /\ recievedDoViewChangeMsgs = [r \in Replica |-> {}]
-        /\ opNumber = [r \in Replica |-> 0]
-        /\ log = [r \in Replica |-> << >>]
-        /\ commitNumber = [r \in Replica |-> 0]
-        /\ prepared = [r \in Replica |-> 0]
-        /\ executedOperations = [r \in Replica |-> << >>]
-\*        /\ sentPreparedOpNumber = [p \in Replica |-> [r \in Replica |-> 0]]
-        /\ recievedPrepareOkOpNumber = [p \in Replica |-> [r \in Replica |-> 0]]
-\*        /\ sentCommitNumber = [p \in Replica |-> [r \in Replica |-> 0]]
-\*        /\ sentStartView = [r \in Replica |-> {}]*)
 
 -----------------------------------------------------------------------------
 
@@ -278,21 +262,7 @@ AchievePrepareOkFromQuorum(p) ==
           /\ Send([type |-> Commit, v |-> ViewNumber(p), k |-> replicaState[p].commitNumber'])
     /\ UNCHANGED <<recoveryCount>>
 
-(*
-CheckAchievePrepareOkFromQuorum(p, m) ==
-    /\ Len(ExecutedOperations(p)) = CommitNumber(p)
-    /\ LET newCommit == CommitNumber(p) + 1
-       IN IF /\ \E Q \in Quorum:
-                    \A r \in Q:
-                        \/ replicaState[p].recievedPrepareOkOpNumber'[r] >= newCommit
-                        \/ r = p
-          THEN /\ commitNumber' = [commitNumber EXCEPT ![p] = newCommit]
-               /\ ExecuteRequest(p, log[p][newCommit].m)
-               /\ ReplyMessage(m, [type |-> Commit, v |-> viewNumber[p], k |-> commitNumber'[p]])
-               /\ UNCHANGED <<prepared>>
-          ELSE /\ Drop(m)
-               /\ UNCHANGED <<replicaExecVars>>
-*)
+\* TODO
 (*
 RecievePrepareOk(p, m) ==
     /\ m.type = PrepareOk
@@ -557,5 +527,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Mar 06 17:09:55 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 17:42:46 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
