@@ -149,7 +149,7 @@ Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
                     lastNormalView |-> 0,
-                    log |-> << >>,
+                    log |-> << [type |-> ViewBlock, view |-> 0] >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
                     executedOperations |-> << >>
@@ -527,5 +527,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Mar 06 17:42:46 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 18:26:41 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
