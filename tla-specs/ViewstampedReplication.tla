@@ -428,8 +428,7 @@ RecieveStartView(r, m) ==
                                             ![r].viewNumber = m.v,
                                             ![r].status = Normal,
                                             ![r].lastNormalView = ViewNumber(r),
-                                            ![r].commitNumber = m.k,
-                                            ![r].prepared = m.k]
+                                            ![r].commitNumber = m.k]
     /\ UNCHANGED <<recoveryCount, msgs>>
 
 \* TODO: add messages for downloading
@@ -446,7 +445,7 @@ ReplicaDownloadBeforeView(r) ==
                                                             IF newEntry = [type |-> ViewBlock, view |-> ViewNumber(r)]  \* Have just downloaded View meta Block 
                                                             THEN None
                                                             ELSE @]
-    /\ UNCHANGED <<recoveryCount>>
+    /\ UNCHANGED <<recoveryCount, msgs>>
 
 -----------------------------------------------------------------------------
 
@@ -504,7 +503,9 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
         \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
         \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
+        \/ \E p \in Replica: MasterDownloadBeforeView(p)
         \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
+        \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
         \/ \E r \in Replica: ReplicaCrash(r)
         \/ \E r \in Replica, m \in msgs: RecoveryReceive(r, m)
         \/ \E r \in Replica: AchieveRecoveryResponseFromQuorum(r)
@@ -562,5 +563,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Feb 22 17:48:52 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 10:30:33 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
