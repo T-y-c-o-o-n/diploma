@@ -243,17 +243,15 @@ RecievePrepare(r, m) ==
              v |-> ViewNumber(r), n |-> m.n, i |-> r])
     /\ UNCHANGED <<recoveryCount>>
 
-(*
 PrepareOperation(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ ~IsDownloadingBeforeView(r)
-    /\ Prepared(r) < Len(Log(r))
-    /\ replicaState' = [replicaState EXCEPT ![r].prepared = @ + 1]
-    /\ Send([(*src |-> r, dst |-> PrimaryReplicaInView(viewNumber[r]), *)type |-> PrepareOk,
-             v |-> ViewNumber(r), n |-> Log(r)[replicaState[r].prepared'].opNumber, i |-> r])
-    /\ UNCHANGED <<recoveryCount>>
-*)
+    /\ LET maxPreparedOpNum == Max({0} \cup {m.n : m \in {m \in msgs: m.type = PrepareOk /\ m.i = r /\ m.v = ViewNumber(r)}})
+       IN /\ LogLen(r) > maxPreparedOpNum
+          /\ Send([type |-> PrepareOk, v |-> ViewNumber(r),
+                   n |-> maxPreparedOpNum + 1, i |-> r])
+    /\ UNCHANGED <<recoveryCount, replicaState>>
 
 ExecuteRequest(r, entry) ==
     /\ replicaState' = [replicaState EXCEPT ![r].executedOperations = Append(@, entry)]
@@ -372,12 +370,7 @@ RecieveDoViewChange(p, m) ==
           /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = None,
                                                   ![p].viewNumber = m.v,
                                                   ![p].status = ViewChange]
-       \/ \* Our view number
-          /\ ViewNumber(p) = m.v
-          /\ Status(p) = ViewChange
-          /\ UNCHANGED <<replicaState>>
-       \/ \* Stale message
-          /\ ViewNumber(p) > m.v
+       \/ \* Our view number or Stale message
           /\ UNCHANGED <<replicaState>>
     /\ Drop(m)
     /\ UNCHANGED <<recoveryCount>>
@@ -385,6 +378,7 @@ RecieveDoViewChange(p, m) ==
 \* Become Primary
 AchieveDoViewChangeFromQuorum(p) ==
     /\ Status(p) = ViewChange
+    /\ IsPrimaryInView(p, ViewNumber(p))
     /\ LET recieved == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p)}
        IN /\ \E Q \in Quorum: /\ p \in Q
                               /\ Q \subseteq {p} \cup {m.i : m \in recieved}
@@ -494,7 +488,7 @@ AchieveRecoveryResponseFromQuorum(r) ==
 
 Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
-\*        \/ \E r \in Replica: PrepareOperation(r)
+        \/ \E r \in Replica: PrepareOperation(r)
 \*        \/ \E p \in Replica, m \in msgs: RecievePrepareOk(p, m)
         \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
@@ -563,5 +557,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Mar 06 10:30:33 MSK 2023 by tycoon
+\* Last modified Mon Mar 06 17:09:55 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
