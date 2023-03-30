@@ -150,6 +150,8 @@ ExecutedOperations(r) == replicaState[r].executedOperations
 
 ExecuteOperation(op) == op
 
+ReplicaIndex(r) == CHOOSE i \in 1..Cardinality(Replica): ReplicaSequence[i] = r
+
 PrimaryReplicaInView(v) == ReplicaSequence[(v % Len(ReplicaSequence)) + 1]
 
 IsPrimaryInView(r, v) == PrimaryReplicaInView(v) = r
@@ -264,7 +266,7 @@ RecieveCommit(r) ==
     /\ \E p \in Replica:
         /\ IsPrimaryInView(p, ViewNumber(r))        
         /\ CommitNumber(p) > CommitNumber(r)
-        /\ \E newCommit \in CommitNumber(r) .. LogLen(r):
+        /\ \E newCommit \in CommitNumber(r) + 1 .. LogLen(r):
                replicaState' = [replicaState EXCEPT ![r].commitNumber = newCommit] 
     /\ UNCHANGED <<recoveryCount>>
 
@@ -286,9 +288,10 @@ RecieveStartViewChange(r) ==
     /\ \E r2 \in Replica:
         /\ ViewNumber(r2) > ViewNumber(r)
         /\ Status(r2) = ViewChange
-        /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
-                                                ![r].viewNumber = ViewNumber(r2),
-                                                ![r].status = ViewChange]
+        /\ \E newView \in ViewNumber(r) + 1 .. ViewNumber(r2):
+               replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
+                                                    ![r].viewNumber = newView,
+                                                    ![r].status = ViewChange]
     /\ UNCHANGED <<recoveryCount>>
 
 \* TODO: ADD ->Er and ->Em states and transitions
@@ -298,17 +301,22 @@ RecieveStartViewChange(r) ==
 AchieveDoViewChangeFromQuorum(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = ViewChange
-    /\ \E Q \in Quorum:
+    /\ \E Q \in Quorum, recievedReplicas \in SUBSET Replica:
         /\ p \in Q
-        /\ \A r \in Q:
+        /\ Q \subseteq recievedReplicas
+        /\ \A r \in recievedReplicas:
+            \* Problem with WithMsg Spec, because other replicas could start new View
             /\ ViewNumber(r) = ViewNumber(p)
             /\ Status(r) = ViewChange
-        /\ LET maxVV == Max({LastNormalView(r) : r \in Q})
-               maxN == Max({OpNumber(r) : r \in {r \in Q : LastNormalView(r) = maxVV}})
-               maxReplica == CHOOSE r \in Q: LastNormalView(r) = maxVV /\ OpNumber(r) = maxN
-               \* newLog == log[maxReplica]
+            \* Problem with WithMsg Spec, because there are can be saved messages with old state (lastNormalView, opNumber, commitNumber)
+            \* And here no such state is saved + other replicas could increase their state
+            \*     => maxVV, maxN, maxReplica and new commit can easily differ from WithMsgs Spec
+        /\ LET maxVV == Max({LastNormalView(r) : r \in recievedReplicas})
+               maxN == Max({OpNumber(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV}})
+               maxReplicaIndex == Max({ReplicaIndex(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV /\ OpNumber(r) = maxN}})
+               maxReplica == CHOOSE r \in recievedReplicas: ReplicaIndex(r) = maxReplicaIndex
            IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
-                                                      ![p].commitNumber = Max({CommitNumber(r) : r \in Q}),
+                                                      ![p].commitNumber = Max({CommitNumber(r) : r \in recievedReplicas}),
                                                       ![p].status = Normal,
                                                       ![p].lastNormalView = ViewNumber(p)]
     /\ UNCHANGED <<recoveryCount>>
@@ -319,12 +327,12 @@ MasterDownloadBeforeView(p) ==
     /\ Status(p) = Normal
     /\ IsDownloadingBeforeView(p)
     /\ ViewNumber(p) = ViewNumber(DownloadReplica(p))  \* If replica will increase view, then this Primary could only start view changing
-    /\ LogLen(p) < LogLen(DownloadReplica(p))
-    /\ LET newEntry == Log(DownloadReplica(p))[LogLen(p) + 1]
-       IN \/ /\ LogLen(p) + 1 = LogLen(DownloadReplica(p))
-             /\ replicaState' = [replicaState EXCEPT ![p].log = Append(Append(@, newEntry), [type |-> ViewBlock, view |-> ViewNumber(p)]),
-                                                     ![p].downloadReplica = None]
-          \/ /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, newEntry)]
+    /\ LogLen(p) <= LogLen(DownloadReplica(p))
+    /\ \/ /\ LogLen(p) = LogLen(DownloadReplica(p))
+          /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
+                                                  ![p].downloadReplica = None]
+       \/ /\ LogLen(p) < LogLen(DownloadReplica(p))
+          /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, Log(DownloadReplica(p))[LogLen(p) + 1])]
     /\ UNCHANGED <<recoveryCount>>
 
 \* Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])
@@ -336,6 +344,7 @@ RecieveStartView(r) ==
             /\ IsPrimary(p)
             /\ Status(p) = Normal
             /\ ~IsDownloadingBeforeView(p)
+            \* Problem with WithMsgs Spec if p has already increased view
             /\ \/ ViewNumber(p) > ViewNumber(r)
                \/ /\ ViewNumber(p) = ViewNumber(r)
                   /\ Status(r) = ViewChange
@@ -343,7 +352,7 @@ RecieveStartView(r) ==
                                                     ![r].downloadReplica = p,
                                                     ![r].viewNumber = ViewNumber(p),
                                                     ![r].status = Normal,
-                                                    ![r].lastNormalView = ViewNumber(p),
+                                                    ![r].lastNormalView = ViewNumber(r),
                                                     ![r].commitNumber = CommitNumber(p)]
     /\ UNCHANGED <<recoveryCount>>
 
@@ -412,7 +421,6 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica: RecieveCommit(r)
         \/ \E r \in Replica: ExecuteClientRequest(r)
-(*
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
         \/ \E r \in Replica: RecieveStartViewChange(r)
         \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
@@ -421,7 +429,7 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica: AchieveRecoveryResponseFromQuorum(r)
         \/ \E p \in Replica: MasterDownloadBeforeView(p)
         \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
-*)
+
 -----------------------------------------------------------------------------
 
 (* Liveness *)
@@ -476,5 +484,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Mar 06 19:44:20 MSK 2023 by tycoon
+\* Last modified Tue Mar 28 11:41:35 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
