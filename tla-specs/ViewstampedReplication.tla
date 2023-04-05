@@ -106,7 +106,6 @@ TypeOK == /\ recoveryCount \in [Replica -> Nat]
             Replica -> [
                 viewNumber: Nat,
                 status: Statuses,
-                lastNormalView: Nat,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
                 commitNumber: Nat,
@@ -147,7 +146,6 @@ lastOpNumber(l) == IF l = <<>> THEN 0 ELSE l[Len(l)].opNumber
 Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
-                    lastNormalView |-> 0,
                     log |-> << [type |-> ViewBlock, view |-> 0] >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
@@ -165,11 +163,11 @@ ViewNumber(r) == replicaState[r].viewNumber
 
 Status(r) == replicaState[r].status
 
-LastNormalView(r) == replicaState[r].lastNormalView 
-
 Log(r) == replicaState[r].log
 
 LogLen(r) == Len(Log(r))
+
+LastNormalView(r) == Max({v.view : v \in {i \in 1 .. LogLen(r) : Log(r)[i].type = ViewBlock}})
 
 OpNumber(r) == LogLen(r)
 
@@ -361,8 +359,7 @@ AchieveDoViewChangeFromQuorum(p) ==
                  maxReplica == (CHOOSE m \in recieved: ReplicaIndex(m.i) = maxReplicaIndex).i
              IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
                                                         ![p].commitNumber = Max({m.k : m \in recieved}),
-                                                        ![p].status = Normal,
-                                                        ![p].lastNormalView = ViewNumber(p)]
+                                                        ![p].status = Normal]
     /\ UNCHANGED <<recoveryCount, msgs>>
 
 \* TODO: add messages for downloading
@@ -393,9 +390,7 @@ RecieveStartView(r, m) ==
     /\ replicaState' = [replicaState EXCEPT ![r].log = SubSeq(Log(r), 1, Min({LogLen(r), CommitNumber(r)})),
                                             ![r].downloadReplica = PrimaryReplicaInView(m.v),
                                             ![r].viewNumber = m.v,
-                                            ![r].status = Normal,
-                                            ![r].lastNormalView = ViewNumber(r),
-                                            ![r].commitNumber = m.k]
+                                            ![r].status = Normal]
     /\ UNCHANGED <<recoveryCount, msgs>>
 
 \* TODO: add messages for downloading
@@ -421,7 +416,6 @@ ReplicaDownloadBeforeView(r) ==
 ReplicaCrash(r) ==
     /\ replicaState' = [replicaState EXCEPT ![r].status = Recovering,
                                             ![r].viewNumber = 0,
-                                            ![r].lastNormalView = 0,
                                             ![r].log = << >>,
                                             ![r].commitNumber = 0,
                                             ![r].executedOperations = << >>,
@@ -452,7 +446,6 @@ AchieveRecoveryResponseFromQuorum(r) ==
               /\ replicaState' = [replicaState EXCEPT ![r].status = Normal,
                                                       ![r].viewNumber = maxView,
                                                       ![r].log = newLog,
-                                                      ![r].lastNormalView = maxView,
                                                       ![r].commitNumber = newCommitNumber]
               /\ UNCHANGED <<recoveryCount, msgs>>
 
@@ -533,5 +526,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Mar 28 11:41:54 MSK 2023 by tycoon
+\* Last modified Thu Mar 30 14:15:35 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon

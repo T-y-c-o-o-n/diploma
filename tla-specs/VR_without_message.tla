@@ -26,12 +26,6 @@ CONSTANTS Recovery, RecoveryResponse
 \* Sequence with all replicas (for view selection)
 CONSTANT ReplicaSequence
 
-(*
-\* State on each replica
-VARIABLES viewNumber, status, lastNormalView,
-          opNumber, log, downloadReplica,
-          commitNumber, prepared, executedOperations
-*)
 \* Persistant state on each replica
 VARIABLE recoveryCount
 
@@ -76,7 +70,6 @@ TypeOK == /\ recoveryCount \in [Replica -> Nat]
             Replica -> [
                 viewNumber: View,
                 status: Statuses,
-                lastNormalView: View,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
                 commitNumber: Nat,
@@ -110,7 +103,6 @@ lastOpNumber(l) == IF l = <<>> THEN 0 ELSE l[Len(l)].opNumber
 Init == /\ replicaState = [r \in Replica |-> [
                     viewNumber |-> 0,
                     status |-> Normal,
-                    lastNormalView |-> 0,
                     log |-> << [type |-> ViewBlock, view |-> 0] >>,
                     downloadReplica |-> None,
                     commitNumber |-> 0,
@@ -134,11 +126,11 @@ ViewNumber(r) == replicaState[r].viewNumber
 
 Status(r) == replicaState[r].status
 
-LastNormalView(r) == replicaState[r].lastNormalView
-
 Log(r) == replicaState[r].log
 
 LogLen(r) == Len(Log(r))
+
+LastNormalView(r) == Max({0} \cup {Log(r)[i].view : i \in {i \in 1 .. LogLen(r) : Log(r)[i].type = ViewBlock}})
 
 OpNumber(r) == LogLen(r)
 
@@ -190,10 +182,13 @@ RecievePrepare(r) ==
     /\ LET primary == PrimaryReplicaInView(ViewNumber(r))
        IN \* /\ ViewNumber(primary) = ViewNumber(r)  \* Here should be "primary was in Normal status in our view and had message"
           \* /\ Status(primary) = Normal
-          /\ MaxLogEntryInView(Log(primary), ViewNumber(r)) > LogLen(r)
-          /\ LogLen(primary) > LogLen(r)
-          /\ Log(primary)[LogLen(r) + 1].type = RequestBlock
-          /\ AddClientRequest(r, Log(primary)[LogLen(r) + 1].m)
+          /\ \/ /\ MaxLogEntryInView(Log(primary), ViewNumber(r)) > LogLen(r)
+                /\ Log(primary)[LogLen(r) + 1].type = RequestBlock
+                /\ AddClientRequest(r, Log(primary)[LogLen(r) + 1].m)
+                \* Recieved Prepare when Primary has already rejected his log entries, for example after recieving StartView
+             \/ /\ MaxLogEntryInView(Log(primary), ViewNumber(r)) = LogLen(r)
+                /\ ViewNumber(primary) > ViewNumber(r)
+                /\ \E op \in Operation: AddClientRequest(r, [type |-> Request, op |-> op])
     /\ UNCHANGED <<recoveryCount>>
 
 (*
@@ -264,10 +259,14 @@ RecieveCommit(r) ==
     /\ Status(r) = Normal
     /\ ~IsDownloadingBeforeView(r)
     /\ \E p \in Replica:
-        /\ IsPrimaryInView(p, ViewNumber(r))        
-        /\ CommitNumber(p) > CommitNumber(r)
-        /\ \E newCommit \in CommitNumber(r) + 1 .. LogLen(r):
-               replicaState' = [replicaState EXCEPT ![r].commitNumber = newCommit] 
+       \E newCommit \in CommitNumber(r) + 1 .. Min({LogLen(r), CommitNumber(p)}):
+           /\ CommitNumber(p) > CommitNumber(r)
+           /\ \E Q \in Quorum:
+               /\ p \in Q
+               /\ \A r2 \in Q:
+                   /\ LogLen(r2) >= newCommit
+                   /\ Log(r2)[newCommit] = Log(r)[newCommit]
+           /\ replicaState' = [replicaState EXCEPT ![r].commitNumber = newCommit] 
     /\ UNCHANGED <<recoveryCount>>
 
 -----------------------------------------------------------------------------
@@ -315,10 +314,10 @@ AchieveDoViewChangeFromQuorum(p) ==
                maxN == Max({OpNumber(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV}})
                maxReplicaIndex == Max({ReplicaIndex(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV /\ OpNumber(r) = maxN}})
                maxReplica == CHOOSE r \in recievedReplicas: ReplicaIndex(r) = maxReplicaIndex
-           IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
+           IN /\ replicaState' = [replicaState EXCEPT ![p].log = IF maxReplica = p THEN Log(p) ELSE SubSeq(Log(p), 1, Min({LogLen(p), CommitNumber(p)})),
+                                                      ![p].downloadReplica = maxReplica,
                                                       ![p].commitNumber = Max({CommitNumber(r) : r \in recievedReplicas}),
-                                                      ![p].status = Normal,
-                                                      ![p].lastNormalView = ViewNumber(p)]
+                                                      ![p].status = Normal]
     /\ UNCHANGED <<recoveryCount>>
 
 \* Mc -> Mc / Mc -> M
@@ -351,9 +350,7 @@ RecieveStartView(r) ==
             /\ replicaState' = [replicaState EXCEPT ![r].log = SubSeq(Log(r), 1, Min({LogLen(r), CommitNumber(r)})),
                                                     ![r].downloadReplica = p,
                                                     ![r].viewNumber = ViewNumber(p),
-                                                    ![r].status = Normal,
-                                                    ![r].lastNormalView = ViewNumber(r),
-                                                    ![r].commitNumber = CommitNumber(p)]
+                                                    ![r].status = Normal]
     /\ UNCHANGED <<recoveryCount>>
 
 \* Rc -> Rc / Rc -> R
@@ -378,7 +375,6 @@ ReplicaDownloadBeforeView(r) ==
 ReplicaCrash(r) ==
     /\ replicaState' = [replicaState EXCEPT ![r].status = Recovering,
                                             ![r].viewNumber = 0,
-                                            ![r].lastNormalView = 0,
                                             ![r].log = << >>,
                                             ![r].commitNumber = 0,
                                             ![r].executedOperations = << >>,
@@ -408,7 +404,6 @@ AchieveRecoveryResponseFromQuorum(r) ==
                  /\ replicaState' = [replicaState EXCEPT ![r].status = Normal,
                                                          ![r].viewNumber = maxView,
                                                          ![r].log = newLog,
-                                                         ![r].lastNormalView = maxView,
                                                          ![r].commitNumber = newCommitNumber]
                  /\ UNCHANGED <<recoveryCount>>
 
@@ -484,5 +479,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Mar 28 11:41:35 MSK 2023 by tycoon
+\* Last modified Wed Apr 05 18:08:20 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
