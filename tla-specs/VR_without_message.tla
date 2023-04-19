@@ -221,9 +221,9 @@ AchieveDoViewChangeFromQuorum(p) ==
                maxN == Max({OpNumber(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV}})
                maxReplicaIndex == Max({ReplicaIndex(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV /\ OpNumber(r) = maxN}})
                maxReplica == CHOOSE r \in recievedReplicas: ReplicaIndex(r) = maxReplicaIndex
-           IN /\ replicaState' = [replicaState EXCEPT ![p].log = IF maxReplica = p THEN Log(p) ELSE SubSeq(Log(p), 1, Min({LogLen(p), CommitNumber(p)})),
-                                                      ![p].downloadReplica = maxReplica,
-                                                      ![p].commitNumber = Max({CommitNumber(r) : r \in recievedReplicas}),
+           IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
+                                                      \* Will update commit number while downloading
+                                                      \* ![p].commitNumber = Max({CommitNumber(r) : r \in recievedReplicas}),
                                                       ![p].status = Normal]
 
 \* Mc -> Mc / Mc -> M
@@ -232,14 +232,17 @@ MasterDownloadBeforeView(p) ==
     /\ Status(p) = Normal
     /\ IsDownloadingBeforeView(p)
     /\ ViewNumber(p) = ViewNumber(DownloadReplica(p))  \* If replica will increase view, then this Primary could only start view changing
-    /\ LogLen(p) <= LogLen(DownloadReplica(p))
-    /\ \/ /\ LogLen(p) = LogLen(DownloadReplica(p))
-          /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
-                                                  ![p].downloadReplica = None]
-       \/ /\ LogLen(p) < LogLen(DownloadReplica(p))
-          /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, Log(DownloadReplica(p))[LogLen(p) + 1])]
-
-\* Append(newLog, [type |-> ViewBlock, view |-> viewNumber[p]])
+    /\ LET entriesToDownload == { i \in CommitNumber(p) + 1 .. LogLen(DownloadReplica(p)):
+                                  \* New entry for r
+                                  \/ LogLen(p) < i
+                                  \* Diff in logs
+                                  \/ Log(p)[i] # Log(DownloadReplica(p))[i] }
+       IN \/ /\ entriesToDownload = {}  \* finish download
+             /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
+                                                     ![p].downloadReplica = None]
+          \/ /\ entriesToDownload # {}
+             /\ LET ind == Min(entriesToDownload)
+                IN /\ replicaState' = [replicaState EXCEPT ![p].log = Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(p))[ind])]
 
 \* Er -> Rc
 \* TODO: setup download up to View metablock
@@ -252,8 +255,7 @@ RecieveStartView(r) ==
             /\ \/ ViewNumber(p) > ViewNumber(r)
                \/ /\ ViewNumber(p) = ViewNumber(r)
                   /\ Status(r) = ViewChange
-            /\ replicaState' = [replicaState EXCEPT ![r].log = SubSeq(Log(r), 1, Min({LogLen(r), CommitNumber(r)})),
-                                                    ![r].downloadReplica = p,
+            /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = p,
                                                     ![r].viewNumber = ViewNumber(p),
                                                     ![r].status = Normal]
 
@@ -262,14 +264,22 @@ ReplicaDownloadBeforeView(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ IsDownloadingBeforeView(r)
-    /\ IF LogLen(DownloadReplica(r)) <= LogLen(r)
-       THEN /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None]
-       ELSE LET newEntry == Log(DownloadReplica(r))[LogLen(r) + 1]
-            IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, newEntry),
-                                                       ![r].downloadReplica =
-                                                            IF newEntry = [type |-> ViewBlock, view |-> ViewNumber(r)]  \* Have just downloaded View meta Block 
-                                                            THEN None
-                                                            ELSE @]
+    /\ LET entriesToDownload == { i \in CommitNumber(r) + 1 .. LogLen(DownloadReplica(r)):
+                                  \* New entry for r
+                                  \/ LogLen(r) < i
+                                  \* Diff in logs
+                                  \/ Log(r)[i] # Log(DownloadReplica(r))[i] }
+       IN \/ /\ entriesToDownload = {}  \* finish download
+             /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(r)]),
+                                                     ![r].downloadReplica = None]
+          \/ /\ entriesToDownload # {}
+             /\ LET ind == Min(entriesToDownload)
+                IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(r))[ind]),
+                                                           ![r].downloadReplica =
+                                                               \* Have just downloaded our View meta Block
+                                                               IF Log(DownloadReplica(r))[ind] = [type |-> ViewBlock, view |-> ViewNumber(r)] 
+                                                               THEN None
+                                                               ELSE @]
 
 -----------------------------------------------------------------------------
 
@@ -354,5 +364,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Apr 19 13:34:00 MSK 2023 by tycoon
+\* Last modified Wed Apr 19 14:31:37 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
