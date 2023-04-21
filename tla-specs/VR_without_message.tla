@@ -125,6 +125,10 @@ MaxLogEntryInView(log, v) == LET first == FirstIndexOfViewBlock(log, v)
                                 THEN FirstIndexOfViewBlock(log, v + 1) - 1
                                 ELSE 0
 
+HasViewBlock(r, v) == LET ind == FirstIndexOfViewBlock(Log(r), v)
+                      IN /\ ind <= LogLen(r)
+                         /\ Log(r)[ind].view = v
+
 RecievePrepare(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
@@ -191,10 +195,8 @@ TimeoutStartViewChanging(r) ==
 
 \* -> E1
 RecieveStartViewChange(r) ==
-    /\ Status(r) = Normal
     /\ \E r2 \in Replica:
         /\ ViewNumber(r2) > ViewNumber(r)
-        /\ Status(r2) = ViewChange
         /\ \E newView \in ViewNumber(r) + 1 .. ViewNumber(r2):
                replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
                                                     ![r].viewNumber = newView,
@@ -248,16 +250,16 @@ MasterDownloadBeforeView(p) ==
 \* TODO: setup download up to View metablock
 RecieveStartView(r) ==
     /\ \E p \in Replica:
-            /\ IsPrimary(p)
-            /\ Status(p) = Normal
-            /\ ~IsDownloadingBeforeView(p)
-            \* Problem with WithMsgs Spec if p has already increased view
-            /\ \/ ViewNumber(p) > ViewNumber(r)
-               \/ /\ ViewNumber(p) = ViewNumber(r)
-                  /\ Status(r) = ViewChange
-            /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = p,
-                                                    ![r].viewNumber = ViewNumber(p),
-                                                    ![r].status = Normal]
+        /\ p # r
+        /\ \E view \in ViewNumber(r) .. ViewNumber(p):
+           /\ IsPrimaryInView(p, view)
+           /\ \/ view > ViewNumber(r)
+              \/ /\ ViewNumber(r) = view
+                 /\ Status(r) = ViewChange
+           /\ HasViewBlock(p, view)  \* p became Normal Master in view
+           /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = p,
+                                                   ![r].viewNumber = view,
+                                                   ![r].status = Normal]
 
 \* Rc -> Rc / Rc -> R
 ReplicaDownloadBeforeView(r) ==
@@ -364,5 +366,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Apr 19 14:31:37 MSK 2023 by tycoon
+\* Last modified Fri Apr 21 15:47:20 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
