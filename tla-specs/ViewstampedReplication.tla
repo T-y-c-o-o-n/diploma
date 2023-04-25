@@ -11,9 +11,6 @@ Statuses == {Normal, ViewChange, Recovering}
 \* Client operation
 CONSTANT Operation
 
-\* Result of executing operation
-Result == Operation
-
 \* types of log blocks
 CONSTANTS RequestBlock, ViewBlock
 
@@ -71,8 +68,7 @@ TypeOK == /\ replicaState \in [
                 status: Statuses,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
-                commitNumber: Nat,
-                executedOperations: Seq(LogEntry)
+                commitNumber: Nat
               ]
             ]
           /\ msgs \in SUBSET Message
@@ -95,8 +91,7 @@ Init == /\ replicaState = [r \in Replica |-> [
                     status |-> Normal,
                     log |-> << [type |-> ViewBlock, view |-> 0] >>,
                     downloadReplica |-> None,
-                    commitNumber |-> 0,
-                    executedOperations |-> << >>
+                    commitNumber |-> 0
                 ]
            ]
         /\ msgs = {}
@@ -123,13 +118,9 @@ DownloadReplica(r) == replicaState[r].downloadReplica
 
 CommitNumber(r) == replicaState[r].commitNumber
 
-ExecutedOperations(r) == replicaState[r].executedOperations
-
 RecievedPrepareOkOpNumber(r) == replicaState[r].recievedPrepareOkOpNumber
 
 \* Helpful functions
-
-ExecuteOperation(op) == op
 
 ReplicaIndex(r) == CHOOSE i \in 1..Cardinality(Replica): ReplicaSequence[i] = r
 
@@ -167,7 +158,7 @@ RecievePrepare(r, m) ==
     /\ m.v = ViewNumber(r)
     /\ m.n = OpNumber(r) + 1
     /\ AddClientRequest(r, m.m)
-    /\ Send([(*src |-> r, dst |-> PrimaryReplicaInView(viewNumber[r]), *)type |-> PrepareOk,
+    /\ Send([type |-> PrepareOk,
              v |-> ViewNumber(r), n |-> m.n, i |-> r])
 
 PrepareOperation(r) ==
@@ -180,29 +171,16 @@ PrepareOperation(r) ==
                    n |-> maxPreparedOpNum + 1, i |-> r])
     /\ UNCHANGED <<replicaState>>
 
-ExecuteRequest(r, entry) ==
-    /\ replicaState' = [replicaState EXCEPT ![r].executedOperations = Append(@, entry)]
-
-ExecuteClientRequest(r) ==
-    /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
-    /\ Len(ExecutedOperations(r)) < CommitNumber(r)
-    /\ Len(ExecutedOperations(r)) < LogLen(r)
-    /\ ExecuteRequest(r, Log(r)[Len(ExecutedOperations(r)) + 1])
-    /\ UNCHANGED <<msgs>>
-
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
     /\ ~IsDownloadingBeforeView(p)
-    /\ Len(ExecutedOperations(p)) = CommitNumber(p)
     /\ LET newCommit == CommitNumber(p) + 1
        IN /\ \E Q \in Quorum:
                  \A r \in Q:
                      \/ Q \subseteq {r} \cup {m.i : m \in {m \in msgs: m.type = PrepareOk /\ m.v = ViewNumber(p) /\ m.n >= newCommit}}
                      \/ r = p
-          /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit,
-                                                  ![p].executedOperations = Append(@, Log(p)[newCommit])]  \* ExecuteRequest(p, Log(p)[newCommit])
+          /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit]
           /\ Send([type |-> Commit, v |-> ViewNumber(p), k |-> replicaState[p].commitNumber'])
 
 RecieveCommit(r, m) ==
@@ -229,8 +207,7 @@ TimeoutStartViewChanging(r) ==
 CheckAchieveStartViewChangeFromQuorum(r, v) ==
     /\ IF \E Q \in Quorum: /\ r \in Q
                            /\ Q = {r} \cup {m.i : m \in {m \in msgs: m.type = StartViewChange /\ m.v = replicaState'[r].viewNumber}}
-       THEN Send([(*src |-> r, dst |-> PrimaryReplicaInView(m.v),*)
-                  type |-> DoViewChange, v |-> v, vv |-> LastNormalView(r),
+       THEN Send([type |-> DoViewChange, v |-> v, vv |-> LastNormalView(r),
                   n |-> OpNumber(r), k |-> CommitNumber(r), i |-> r])
        ELSE UNCHANGED <<msgs>>
 
@@ -348,7 +325,6 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica: PrepareOperation(r)
         \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
-        \/ \E r \in Replica: ExecuteClientRequest(r)
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
         \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
         \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
@@ -393,8 +369,6 @@ EveryViewHasAtMostOnePrimary == \A v \in 0..10: \A r1, r2 \in Replica:
 
 PreficiesAreEqual(s1, s2) == \A i \in DOMAIN s1 \cap DOMAIN s2: s1[i] = s2[i]
 
-ExecutedOperationsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesAreEqual(ExecutedOperations(r1), ExecutedOperations(r2))
-
 PreficiesOfLenAreEqual(s1, s2, prefLen) == \A i \in DOMAIN s1 \cap DOMAIN s2 \cap 1..prefLen: s1[i] = s2[i]
 
 CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Log(r1), Log(r2), Min({CommitNumber(r1), CommitNumber(r2)}))
@@ -409,5 +383,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Apr 21 15:37:06 MSK 2023 by tycoon
+\* Last modified Tue Apr 25 20:29:15 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon

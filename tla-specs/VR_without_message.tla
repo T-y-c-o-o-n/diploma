@@ -43,8 +43,7 @@ TypeOK == /\ replicaState \in [
                 status: Statuses,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
-                commitNumber: Nat,
-                executedOperations: Seq(LogEntry)
+                commitNumber: Nat
               ]
             ]
 
@@ -66,8 +65,7 @@ Init == /\ replicaState = [r \in Replica |-> [
                     status |-> Normal,
                     log |-> << [type |-> ViewBlock, view |-> 0] >>,
                     downloadReplica |-> None,
-                    commitNumber |-> 0,
-                    executedOperations |-> << >>
+                    commitNumber |-> 0
                 ]
            ]
 
@@ -88,10 +86,6 @@ OpNumber(r) == LogLen(r)
 DownloadReplica(r) == replicaState[r].downloadReplica
 
 CommitNumber(r) == replicaState[r].commitNumber
-
-ExecutedOperations(r) == replicaState[r].executedOperations
-
-ExecuteOperation(op) == op
 
 ReplicaIndex(r) == CHOOSE i \in 1..Cardinality(Replica): ReplicaSequence[i] = r
 
@@ -145,28 +139,16 @@ RecievePrepare(r) ==
                 /\ \E op \in Operation: AddClientRequest(r, [type |-> Request, op |-> op])
 
 
-ExecuteRequest(r, entry) ==
-    /\ replicaState' = [replicaState EXCEPT ![r].executedOperations = Append(@, entry)]
-
-ExecuteClientRequest(r) ==
-    /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
-    /\ Len(ExecutedOperations(r)) < CommitNumber(r)
-    /\ Len(ExecutedOperations(r)) < Len(Log(r))
-    /\ ExecuteRequest(r, Log(r)[Len(ExecutedOperations(r)) + 1])
-
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
     /\ ~IsDownloadingBeforeView(p)
-    /\ Len(ExecutedOperations(p)) = CommitNumber(p)
     /\ LET newCommit == CommitNumber(p) + 1
        IN /\ \E Q \in Quorum:
                  \A r \in Q:
                      \/ MaxLogEntryInView(Log(r), ViewNumber(p)) >= newCommit
                      \/ r = p
-          /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit,
-                                                  ![p].executedOperations = Append(@, Log(p)[newCommit])]  \* ExecuteRequest(p, Log(p)[newCommit])
+          /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit]
 
 RecieveCommit(r) ==
     /\ ~IsPrimary(r)  \* Need this?
@@ -290,7 +272,6 @@ Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
         \/ \E r \in Replica: RecievePrepare(r)
         \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
         \/ \E r \in Replica: RecieveCommit(r)
-        \/ \E r \in Replica: ExecuteClientRequest(r)
         \/ \E r \in Replica: TimeoutStartViewChanging(r)
         \/ \E r \in Replica: RecieveStartViewChange(r)
         \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
@@ -334,12 +315,6 @@ EveryViewHasAtMostOnePrimary == \A v \in 0..10: \A r1, r2 \in Replica:
 
 PreficiesAreEqual(s1, s2) == \A i \in DOMAIN s1 \cap DOMAIN s2: s1[i] = s2[i]
 
-ExecutedOperationsPreficesAreEqual == \A r1, r2 \in Replica:
-                                          PreficiesAreEqual(
-                                              ExecutedOperations(r1),
-                                              ExecutedOperations(r2)
-                                          )
-
 PreficiesOfLenAreEqual(s1, s2, prefLen) == \A i \in DOMAIN s1 \cap DOMAIN s2
                                                               \cap 1..prefLen:
                                                                   s1[i] = s2[i]
@@ -366,5 +341,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Apr 21 15:47:20 MSK 2023 by tycoon
+\* Last modified Fri Apr 21 19:49:22 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
