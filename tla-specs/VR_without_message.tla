@@ -32,9 +32,7 @@ Statuses == {Normal, ViewChange, Recovering}
 
 View == Nat
 
-RequestMessage == [type: {Request}, op: Operation]
-
-LogEntry == [type: {RequestBlock}, opNumber: Nat, m: RequestMessage]
+LogEntry == [type: {RequestBlock}, opNumber: Nat, op: Operation]
        \cup [type: {ViewBlock}, view: View]
 
 TypeOK == /\ replicaState \in [
@@ -341,5 +339,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(
 
 =============================================================================
 \* Modification History
-\* Last modified Fri Apr 21 19:49:22 MSK 2023 by tycoon
+\* Last modified Wed Apr 26 19:52:06 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
