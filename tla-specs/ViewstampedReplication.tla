@@ -6,27 +6,20 @@ CONSTANTS Replica, Quorum
 \* Replica Status
 CONSTANTS Normal, ViewChange, Recovering
 
-Statuses == {Normal, ViewChange, Recovering}
-
 \* Client operation
 CONSTANT Operation
 
 \* types of log blocks
 CONSTANTS RequestBlock, ViewBlock
 
-RequestNumber == Nat
-
 \* Special value
 CONSTANT None
 
 \* Message types for processing logs
-CONSTANTS Request, DownloadChunk, StartDownload, PrepareOk, Reply, Commit
+CONSTANTS DownloadChunk, StartDownload, PrepareOk, Commit
 
 \* Message types for view changing
 CONSTANTS StartViewChange, DoViewChange, StartView
-
-\* Message types for replica recovery
-CONSTANTS Recovery, RecoveryResponse
 
 \* Sequence with all replicas (for view selection)
 CONSTANT ReplicaSequence
@@ -39,6 +32,8 @@ VARIABLE msgs
 vars == <<replicaState, msgs>>
 
 -----------------------------------------------------------------------------
+
+Statuses == {Normal, ViewChange, Recovering}
 
 LogEntry == [type: {RequestBlock}, opNumber: Nat, op: Operation]
        \cup [type: {ViewBlock}, view: Nat]
@@ -56,10 +51,6 @@ Message == [type: {DownloadChunk}, v: Nat, m: LogEntry, n: Nat, k: Nat, i: Repli
 Send(m) == msgs' = msgs \cup {m}
 
 SendAll(ms) == /\ msgs' = msgs \cup ms
-
-ReplyMessage(request, response) ==
-    /\ request \in msgs
-    /\ msgs' = (msgs \ {request}) \cup {response}
 
 TypeOK == /\ replicaState \in [
             Replica -> [
@@ -117,8 +108,6 @@ DownloadReplica(r) == replicaState[r].downloadReplica
 
 CommitNumber(r) == replicaState[r].commitNumber
 
-RecievedPrepareOkOpNumber(r) == replicaState[r].recievedPrepareOkOpNumber
-
 \* Helpful functions
 
 ReplicaIndex(r) == CHOOSE i \in 1..Cardinality(Replica): ReplicaSequence[i] = r
@@ -129,8 +118,10 @@ IsPrimaryInView(r, v) == PrimaryReplicaInView(v) = r
 
 IsPrimary(r) == IsPrimaryInView(r, ViewNumber(r))
 
-IsDownloadingBeforeView(r) ==
+IsDownloading(r) ==
     /\ replicaState[r].downloadReplica # None
+
+-----------------------------------------------------------------------------
 
 AddClientRequest(r, m) ==
     /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, m)]
@@ -139,7 +130,7 @@ AddClientRequest(r, m) ==
 RecieveClientRequest(p, op) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
-    /\ ~IsDownloadingBeforeView(p)
+    /\ ~IsDownloading(p)
     /\ AddClientRequest(p, [type |-> RequestBlock,
                             opNumber |-> OpNumber(p) + 1,
                             op |-> op])
@@ -148,9 +139,9 @@ RecieveClientRequest(p, op) ==
              n |-> OpNumber(p) + 1, k |-> CommitNumber(p), i |-> p])
 
 RecievePrepare(r, m) ==
-    /\ ~IsPrimary(r)  \* Need this?
+    /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
+    /\ ~IsDownloading(r)
     /\ m.type = DownloadChunk
     /\ m.v = ViewNumber(r)
     /\ m.n = OpNumber(r) + 1
@@ -162,7 +153,7 @@ RecievePrepare(r, m) ==
 PrepareOperation(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
+    /\ ~IsDownloading(r)
     /\ LET maxPreparedOpNum == Max({0} \cup {m.n : m \in {m \in msgs: m.type = PrepareOk /\ m.i = r /\ m.v = ViewNumber(r)}})
        IN /\ LogLen(r) > maxPreparedOpNum
           /\ Send([type |-> PrepareOk, v |-> ViewNumber(r),
@@ -172,7 +163,7 @@ PrepareOperation(r) ==
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
-    /\ ~IsDownloadingBeforeView(p)
+    /\ ~IsDownloading(p)
     /\ LET newCommit == CommitNumber(p) + 1
        IN /\ \E Q \in Quorum:
                  \A r \in Q:
@@ -182,9 +173,9 @@ AchievePrepareOkFromQuorum(p) ==
           /\ Send([type |-> Commit, v |-> ViewNumber(p), k |-> replicaState[p].commitNumber'])
 
 RecieveCommit(r, m) ==
-    /\ ~IsPrimary(r)  \* Need this?
+    /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
+    /\ ~IsDownloading(r)
     /\ m.type = Commit
     /\ m.v = ViewNumber(r)
     /\ m.k > CommitNumber(r)
@@ -231,14 +222,11 @@ RecieveStartViewChange(r, m) ==
 RecieveDoViewChange(p, m) ==
     /\ m.type = DoViewChange
     /\ IsPrimaryInView(p, m.v)
-    /\ \/ \* Update view number
-          /\ ViewNumber(p) < m.v
-          /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = None,
-                                                  ![p].viewNumber = m.v,
-                                                  ![p].status = ViewChange]
-          /\ UNCHANGED <<msgs>>
-       \/ \* Our view number or Stale message
-          /\ UNCHANGED <<replicaState, msgs>>
+    /\ ViewNumber(p) < m.v
+    /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = None,
+                                            ![p].viewNumber = m.v,
+                                            ![p].status = ViewChange]
+    /\ UNCHANGED <<msgs>>
 
 \* Become Primary
 AchieveDoViewChangeFromQuorum(p) ==
@@ -272,7 +260,7 @@ SendDownloadChunks(r) ==
 \* Mc / Rc
 ReceiveDownloadChunk(r) ==
     /\ Status(r) # Recovering
-    /\ IsDownloadingBeforeView(r)
+    /\ IsDownloading(r)
     /\ LET msgsToDownload == { msg \in msgs:
                                    /\ msg.type = DownloadChunk 
                                    /\ msg.v = ViewNumber(r)
@@ -288,27 +276,20 @@ ReceiveDownloadChunk(r) ==
                                                         ![r].commitNumber = MinMsg.k]
                 /\ UNCHANGED <<msgs>>
 
-\* TODO: add messages for downloading
-\* Mc -> Mc / Mc -> M
+\* Mc -> M
 MasterFinishDownload(p) ==
     /\ IsPrimary(p)
-    /\ Status(p) = Normal
-    /\ IsDownloadingBeforeView(p)
     /\ Status(p) # Recovering
-    /\ IsDownloadingBeforeView(p)
-    /\ LET msgsToDownload == { msg \in msgs:
-                                   /\ msg.type = DownloadChunk
-                                   /\ msg.v = ViewNumber(p)
-                                   /\ msg.i = DownloadReplica(p)
-                                   /\ \/ LogLen(p) < msg.n
-                                      \/ Log(p)[msg.n] # msg.m }
-       IN /\ msgsToDownload = {}
-          /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
-                                                  ![p].downloadReplica = None]
-          /\ Send([type |-> StartView,
-                   v |-> ViewNumber(p),
-                   n |-> OpNumber(p)',
-                   k |-> replicaState[p].commitNumber'])
+    /\ IsDownloading(p)
+    /\ LET doViewChangeReceived == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p) /\ m.i = DownloadReplica(p)}
+           IN /\ doViewChangeReceived # {}
+              /\ OpNumber(p) >= (CHOOSE m \in doViewChangeReceived: TRUE).n
+    /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
+                                            ![p].downloadReplica = None]
+    /\ Send([type |-> StartView,
+             v |-> ViewNumber(p),
+             n |-> OpNumber(p)',
+             k |-> replicaState[p].commitNumber'])
 
 RecieveStartView(r, m) ==
     /\ m.type = StartView
@@ -324,39 +305,34 @@ RecieveStartView(r, m) ==
 ReplicaFinishDownload(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ IsDownloadingBeforeView(r)
-    /\ LET msgsToDownload == { msg \in msgs:
-                                   /\ msg.type = DownloadChunk
-                                   /\ msg.v = ViewNumber(r)
-                                   /\ msg.i = DownloadReplica(r)
-                                   /\ \/ LogLen(r) < msg.n
-                                      \/ Log(r)[msg.n] # msg.m }
-       IN /\ \/ msgsToDownload = {}
-             \/ /\ msgsToDownload # {}
-                /\ LET MinOpNum == Min({msg.n: msg \in msgsToDownload})
-                       MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
-                   IN /\ MinMsg = [type |-> ViewBlock, view |-> ViewNumber(r)]
-          /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(r)]),
-                                                  ![r].downloadReplica = None]
+    /\ IsDownloading(r)
+    /\ Log(r)[LogLen(r)] = [type |-> ViewBlock, view |-> ViewNumber(r)]
+    /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(r)]),
+                                            ![r].downloadReplica = None]
     /\ UNCHANGED <<msgs>>
 
 -----------------------------------------------------------------------------
 
+NormalOperationProtocol ==
+    \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
+    \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
+    \/ \E r \in Replica: PrepareOperation(r)
+    \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
+    \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
+        
+ViewChangeProtocol ==
+    \/ \E r \in Replica: TimeoutStartViewChanging(r)
+    \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
+    \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
+    \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
+    \/ \E r \in Replica: SendDownloadChunks(r)
+    \/ \E r \in Replica: ReceiveDownloadChunk(r)
+    \/ \E p \in Replica: MasterFinishDownload(p)
+    \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
+    \/ \E r \in Replica: ReplicaFinishDownload(r)
 
-Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
-        \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
-        \/ \E r \in Replica: PrepareOperation(r)
-        \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
-        \/ \E r \in Replica, m \in msgs: RecieveCommit(r, m)
-        \/ \E r \in Replica: TimeoutStartViewChanging(r)
-        \/ \E r \in Replica, m \in msgs: RecieveStartViewChange(r, m)
-        \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
-        \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
-        \/ \E r \in Replica: SendDownloadChunks(r)
-        \/ \E r \in Replica: ReceiveDownloadChunk(r)
-        \/ \E p \in Replica: MasterFinishDownload(p)
-        \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
-        \/ \E r \in Replica: ReplicaFinishDownload(r)
+Next == \/ NormalOperationProtocol
+        \/ ViewChangeProtocol
 
 -----------------------------------------------------------------------------
 
@@ -408,5 +384,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Apr 26 19:23:59 MSK 2023 by tycoon
+\* Last modified Thu May 04 19:50:04 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon

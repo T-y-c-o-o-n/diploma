@@ -12,32 +12,27 @@ CONSTANT Operation
 \* types of log blocks
 CONSTANTS RequestBlock, ViewBlock
 
+\* Special value
+CONSTANT None
+
+\* Sequence with all replicas (for view selection)
+CONSTANT ReplicaSequence
+
 \* State on each replica
 VARIABLE replicaState
 
 vars == <<replicaState>>
 
-\* Special value
-CONSTANT None
-
-\* Message types for processing client request
-CONSTANTS Request
-
-\* Sequence with all replicas (for view selection)
-CONSTANT ReplicaSequence
+-----------------------------------------------------------------------------
 
 Statuses == {Normal, ViewChange, Recovering}
 
------------------------------------------------------------------------------
-
-View == Nat
-
 LogEntry == [type: {RequestBlock}, opNumber: Nat, op: Operation]
-       \cup [type: {ViewBlock}, view: View]
+       \cup [type: {ViewBlock}, view: Nat]
 
 TypeOK == /\ replicaState \in [
             Replica -> [
-                viewNumber: View,
+                viewNumber: Nat,
                 status: Statuses,
                 log: Seq(LogEntry),
                 downloadReplica: Replica \cup {None},
@@ -46,15 +41,13 @@ TypeOK == /\ replicaState \in [
             ]
 
 ASSUME QuorumAssumption == /\ \A Q \in Quorum : Q \subseteq Replica
-                           /\ \A Q1, Q2 \in Quorum : Q1 \cap Q2 # {} 
+                           /\ \A Q1, Q2 \in Quorum : Q1 \cap Q2 # {}
 
 ASSUME IsFiniteSet(Replica)
 
 Min(S) == CHOOSE x \in S: \A y \in S: x <= y
 
 Max(S) == CHOOSE x \in S: \A y \in S: y <= x
-
-lastOpNumber(l) == IF l = <<>> THEN 0 ELSE l[Len(l)].opNumber
 
 -----------------------------------------------------------------------------
 
@@ -93,21 +86,8 @@ IsPrimaryInView(r, v) == PrimaryReplicaInView(v) = r
 
 IsPrimary(r) == IsPrimaryInView(r, replicaState[r].viewNumber)
 
-IsDownloadingBeforeView(r) ==
+IsDownloading(r) ==
     /\ replicaState[r].downloadReplica # None
-
-AddClientRequest(r, m) ==
-    /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [
-                                                type |-> RequestBlock,
-                                                opNumber |-> OpNumber(r) + 1,
-                                                m |-> m
-                                              ])]
-
-RecieveClientRequest(p, op) ==
-    /\ IsPrimary(p)
-    /\ Status(p) = Normal
-    /\ ~IsDownloadingBeforeView(p)
-    /\ AddClientRequest(p, [type |-> Request, op |-> op])
 
 FirstIndexOfViewBlock(log, v) == Min({Len(log) + 1} \cup {i \in 1 .. Len(log) : log[i].type = ViewBlock /\ log[i].view >= v})
 
@@ -121,26 +101,50 @@ HasViewBlock(r, v) == LET ind == FirstIndexOfViewBlock(Log(r), v)
                       IN /\ ind <= LogLen(r)
                          /\ Log(r)[ind].view = v
 
+MaxViewLessOrEq(log, v) == Max({0} \cup {log[i].view : i \in {i \in 1 .. Len(log) : log[i].type = ViewBlock /\ log[i].view <= v}})
+
+MaxOpNumBeforeView(log, v) == FirstIndexOfViewBlock(log, v) - 1
+
+-----------------------------------------------------------------------------
+
+(* NORMAL OPERATION *)
+
+AddClientRequest(r, m) ==
+    /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, m)]
+
+RecieveClientRequest(p, op) ==
+    /\ IsPrimary(p)
+    /\ Status(p) = Normal
+    /\ ~IsDownloading(p)
+    /\ AddClientRequest(p, [type |-> RequestBlock,
+                            opNumber |-> OpNumber(p) + 1,
+                            op |-> op])
+
 RecievePrepare(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
-    /\ LET primary == PrimaryReplicaInView(ViewNumber(r))
-       IN \* /\ ViewNumber(primary) = ViewNumber(r)  \* Here should be "primary was in Normal status in our view and had message"
-          \* /\ Status(primary) = Normal
-          /\ \/ /\ MaxLogEntryInView(Log(primary), ViewNumber(r)) > LogLen(r)
-                /\ Log(primary)[LogLen(r) + 1].type = RequestBlock
-                /\ AddClientRequest(r, Log(primary)[LogLen(r) + 1].m)
-                \* Recieved Prepare when Primary has already rejected his log entries, for example after recieving StartView
-             \/ /\ MaxLogEntryInView(Log(primary), ViewNumber(r)) = LogLen(r)
-                /\ ViewNumber(primary) > ViewNumber(r)
-                /\ \E op \in Operation: AddClientRequest(r, [type |-> Request, op |-> op])
-
+    /\ ~IsDownloading(r)
+          \* Has Replica with saved request from primary
+    /\ \/ /\ \E r2 \in Replica:
+                 /\ MaxLogEntryInView(Log(r2), ViewNumber(r)) > OpNumber(r)
+                 /\ Log(r2)[OpNumber(r) + 1].type = RequestBlock
+                 /\ AddClientRequest(r, Log(r2)[OpNumber(r) + 1])
+          \* There is no saved request from primary
+       \/ /\ \A r2 \in Replica:
+                 /\ MaxLogEntryInView(Log(r2), ViewNumber(r)) <= OpNumber(r)
+          \* + primary will not generate new Prepare
+          /\ LET p == PrimaryReplicaInView(ViewNumber(r))
+             IN \/ ViewNumber(p) > ViewNumber(r)
+                \/ Status(p) = Recovering
+          \* suddenly got old sent request from primary
+          /\ \E op \in Operation: AddClientRequest(r, [type |-> RequestBlock,
+                                                       opNumber |-> OpNumber(r) + 1,
+                                                       op |-> op])
 
 AchievePrepareOkFromQuorum(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
-    /\ ~IsDownloadingBeforeView(p)
+    /\ ~IsDownloading(p)
     /\ LET newCommit == CommitNumber(p) + 1
        IN /\ \E Q \in Quorum:
                  \A r \in Q:
@@ -149,9 +153,9 @@ AchievePrepareOkFromQuorum(p) ==
           /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit]
 
 RecieveCommit(r) ==
-    /\ ~IsPrimary(r)  \* Need this?
+    /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ ~IsDownloadingBeforeView(r)
+    /\ ~IsDownloading(r)
     /\ LET p == PrimaryReplicaInView(ViewNumber(r))
        IN /\ \E newCommit \in CommitNumber(r) + 1 .. Min({LogLen(r), CommitNumber(p)}):  \* think about right border
               /\ \E Q \in Quorum:
@@ -164,7 +168,7 @@ RecieveCommit(r) ==
 
 -----------------------------------------------------------------------------
 
-(* View Changing *)
+(* VIEW CHANGING *)
 
 \* -> E1
 TimeoutStartViewChanging(r) ==
@@ -194,31 +198,30 @@ AchieveDoViewChangeFromQuorum(p) ==
         /\ Q \subseteq recievedReplicas
         /\ \A r \in recievedReplicas:
             \* Problem with WithMsg Spec, because other replicas could start new View
-            /\ ViewNumber(r) = ViewNumber(p)
-            /\ Status(r) = ViewChange
-            \* Problem with WithMsg Spec, because there are can be saved messages with old state (lastNormalView, opNumber, commitNumber)
+            /\ \/ /\ ViewNumber(r) = ViewNumber(p)
+                  /\ Status(r) = ViewChange
+                  \* r has already joined to new elections
+               \/ /\ ViewNumber(r) > ViewNumber(p)
+            \* Can't just take LastNormalView(r) and OpNumber(r), because there are can be saved messages with old state (lastNormalView, opNumber)
             \* And here no such state is saved + other replicas could increase their state
             \*     => maxVV, maxN, maxReplica and new commit can easily differ from WithMsgs Spec
-        /\ LET maxVV == Max({LastNormalView(r) : r \in recievedReplicas})
-               maxN == Max({OpNumber(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV}})
+        /\ LET maxVV == Max({MaxViewLessOrEq(Log(r), ViewNumber(p) - 1) : r \in recievedReplicas})
+               maxN == Max({MaxOpNumBeforeView(Log(r), ViewNumber(p)) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV}})
                maxReplicaIndex == Max({ReplicaIndex(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV /\ OpNumber(r) = maxN}})
                maxReplica == CHOOSE r \in recievedReplicas: ReplicaIndex(r) = maxReplicaIndex
            IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
-                                                      \* Will update commit number while downloading
-                                                      \* ![p].commitNumber = Max({CommitNumber(r) : r \in recievedReplicas}),
                                                       ![p].status = Normal]
 
 \* Mc -> Mc / Mc -> M
 MasterDownloadBeforeView(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
-    /\ IsDownloadingBeforeView(p)
-    /\ ViewNumber(p) = ViewNumber(DownloadReplica(p))  \* If replica will increase view, then this Primary could only start view changing
-    /\ LET entriesToDownload == { i \in CommitNumber(p) + 1 .. LogLen(DownloadReplica(p)):
-                                  \* New entry for r
-                                  \/ LogLen(p) < i
-                                  \* Diff in logs
-                                  \/ Log(p)[i] # Log(DownloadReplica(p))[i] }
+    /\ IsDownloading(p)
+    /\ LET entriesToDownload == { i \in CommitNumber(p) + 1 .. FirstIndexOfViewBlock(Log(DownloadReplica(p)), ViewNumber(p) + 1) - 1:
+                                      \* New entry for r
+                                      \/ LogLen(p) < i
+                                      \* Diff in logs
+                                      \/ Log(p)[i] # Log(DownloadReplica(p))[i] }
        IN \/ /\ entriesToDownload = {}  \* finish download
              /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
                                                      ![p].downloadReplica = None]
@@ -227,7 +230,6 @@ MasterDownloadBeforeView(p) ==
                 IN /\ replicaState' = [replicaState EXCEPT ![p].log = Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(p))[ind])]
 
 \* Er -> Rc
-\* TODO: setup download up to View metablock
 RecieveStartView(r) ==
     /\ \E p \in Replica:
         /\ p # r
@@ -245,37 +247,39 @@ RecieveStartView(r) ==
 ReplicaDownloadBeforeView(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
-    /\ IsDownloadingBeforeView(r)
-    /\ LET entriesToDownload == { i \in CommitNumber(r) + 1 .. LogLen(DownloadReplica(r)):
+    /\ IsDownloading(r)
+    /\ LET entriesToDownload == { i \in CommitNumber(r) + 1 .. FirstIndexOfViewBlock(Log(DownloadReplica(r)), ViewNumber(r) + 1) - 1:
                                   \* New entry for r
                                   \/ LogLen(r) < i
                                   \* Diff in logs
                                   \/ Log(r)[i] # Log(DownloadReplica(r))[i] }
-       IN \/ /\ entriesToDownload = {}  \* finish download
-             /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(r)]),
-                                                     ![r].downloadReplica = None]
-          \/ /\ entriesToDownload # {}
-             /\ LET ind == Min(entriesToDownload)
-                IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(r))[ind]),
-                                                           ![r].downloadReplica =
-                                                               \* Have just downloaded our View meta Block
-                                                               IF Log(DownloadReplica(r))[ind] = [type |-> ViewBlock, view |-> ViewNumber(r)] 
-                                                               THEN None
-                                                               ELSE @]
+       IN /\ entriesToDownload # {}
+          /\ LET ind == Min(entriesToDownload)
+             IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(r))[ind]),
+                                                        ![r].downloadReplica =
+                                                                      \* Have just downloaded our View meta Block
+                                                                      IF Log(DownloadReplica(r))[ind] = [type |-> ViewBlock, view |-> ViewNumber(r)] 
+                                                                      THEN None
+                                                                      ELSE @]
 
 -----------------------------------------------------------------------------
 
+NormalOperationProtocol ==
+    \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
+    \/ \E r \in Replica: RecievePrepare(r)
+    \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
+    \/ \E r \in Replica: RecieveCommit(r)
 
-Next == \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
-        \/ \E r \in Replica: RecievePrepare(r)
-        \/ \E p \in Replica: AchievePrepareOkFromQuorum(p)
-        \/ \E r \in Replica: RecieveCommit(r)
-        \/ \E r \in Replica: TimeoutStartViewChanging(r)
-        \/ \E r \in Replica: RecieveStartViewChange(r)
-        \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
-        \/ \E r \in Replica: RecieveStartView(r)
-        \/ \E p \in Replica: MasterDownloadBeforeView(p)
-        \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
+ViewChangeProtocol ==
+    \/ \E r \in Replica: TimeoutStartViewChanging(r)
+    \/ \E r \in Replica: RecieveStartViewChange(r)
+    \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
+    \/ \E r \in Replica: RecieveStartView(r)
+    \/ \E p \in Replica: MasterDownloadBeforeView(p)
+    \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
+
+Next == \/ NormalOperationProtocol
+        \/ ViewChangeProtocol
 
 -----------------------------------------------------------------------------
 
@@ -339,5 +343,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Apr 26 19:52:06 MSK 2023 by tycoon
+\* Last modified Thu May 04 20:07:23 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
