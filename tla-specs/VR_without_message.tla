@@ -23,6 +23,9 @@ VARIABLE replicaState
 
 vars == <<replicaState>>
 
+\* For state space limitation
+CONSTANT MaxRequests, MaxViews
+
 -----------------------------------------------------------------------------
 
 Statuses == {Normal, ViewChange, Recovering}
@@ -105,6 +108,10 @@ MaxViewLessOrEq(log, v) == Max({0} \cup {log[i].view : i \in {i \in 1 .. Len(log
 
 MaxOpNumBeforeView(log, v) == FirstIndexOfViewBlock(log, v) - 1
 
+RequestBlockCount(log) == Cardinality({i \in DOMAIN log: log[i].type = RequestBlock})
+
+ViewBlockCount(log) == Cardinality({i \in DOMAIN log: log[i].type = ViewBlock})
+
 -----------------------------------------------------------------------------
 
 (* NORMAL OPERATION *)
@@ -113,6 +120,7 @@ AddClientRequest(r, m) ==
     /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, m)]
 
 RecieveClientRequest(p, op) ==
+    /\ RequestBlockCount(Log(p)) < MaxRequests
     /\ IsPrimary(p)
     /\ Status(p) = Normal
     /\ ~IsDownloading(p)
@@ -121,6 +129,7 @@ RecieveClientRequest(p, op) ==
                             op |-> op])
 
 RecievePrepare(r) ==
+    /\ RequestBlockCount(Log(r)) < MaxRequests
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ ~IsDownloading(r)
@@ -147,9 +156,8 @@ AchievePrepareOkFromQuorum(p) ==
     /\ ~IsDownloading(p)
     /\ LET newCommit == CommitNumber(p) + 1
        IN /\ \E Q \in Quorum:
-                 \A r \in Q:
-                     \/ MaxLogEntryInView(Log(r), ViewNumber(p)) >= newCommit
-                     \/ r = p
+                 /\ \A r \in Q: MaxLogEntryInView(Log(r), ViewNumber(p)) >= newCommit
+                 /\ p \in Q
           /\ replicaState' = [replicaState EXCEPT ![p].commitNumber = newCommit]
 
 RecieveCommit(r) ==
@@ -172,6 +180,7 @@ RecieveCommit(r) ==
 
 \* -> E1
 TimeoutStartViewChanging(r) ==
+    /\ ViewNumber(r) + 1 < MaxViews
     /\ Status(r) = Normal
     /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
                                             ![r].viewNumber = @ + 1,
@@ -197,7 +206,6 @@ AchieveDoViewChangeFromQuorum(p) ==
         /\ p \in Q
         /\ Q \subseteq recievedReplicas
         /\ \A r \in recievedReplicas:
-            \* Problem with WithMsg Spec, because other replicas could start new View
             /\ \/ /\ ViewNumber(r) = ViewNumber(p)
                   /\ Status(r) = ViewChange
                   \* r has already joined to new elections
@@ -208,8 +216,18 @@ AchieveDoViewChangeFromQuorum(p) ==
         /\ LET maxVV == Max({MaxViewLessOrEq(Log(r), ViewNumber(p) - 1) : r \in recievedReplicas})
                maxN == Max({MaxOpNumBeforeView(Log(r), ViewNumber(p)) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV}})
                maxReplicaIndex == Max({ReplicaIndex(r) : r \in {r \in recievedReplicas : LastNormalView(r) = maxVV /\ OpNumber(r) = maxN}})
-               maxReplica == CHOOSE r \in recievedReplicas: ReplicaIndex(r) = maxReplicaIndex
-           IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
+               maxReplica ==
+                      \* If we are suit then choose ourselves  
+                   IF /\ maxVV = MaxViewLessOrEq(Log(p), ViewNumber(p) - 1)
+                      /\ maxN = MaxOpNumBeforeView(Log(p), ViewNumber(p))
+                   THEN p
+                   ELSE CHOOSE r \in recievedReplicas: ReplicaIndex(r) = maxReplicaIndex
+           IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = IF maxReplica = p
+                                                                             THEN None
+                                                                             ELSE maxReplica,
+                                                      ![p].log = IF maxReplica = p
+                                                                 THEN Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)])
+                                                                 ELSE @,
                                                       ![p].status = Normal]
 
 \* Mc -> Mc / Mc -> M
@@ -217,17 +235,23 @@ MasterDownloadBeforeView(p) ==
     /\ IsPrimary(p)
     /\ Status(p) = Normal
     /\ IsDownloading(p)
-    /\ LET entriesToDownload == { i \in CommitNumber(p) + 1 .. FirstIndexOfViewBlock(Log(DownloadReplica(p)), ViewNumber(p) + 1) - 1:
+    /\ LET finishPos == FirstIndexOfViewBlock(Log(DownloadReplica(p)), ViewNumber(p) + 1) - 1
+           entriesToDownload == { i \in CommitNumber(p) + 1 .. finishPos:
                                       \* New entry for r
                                       \/ LogLen(p) < i
                                       \* Diff in logs
                                       \/ Log(p)[i] # Log(DownloadReplica(p))[i] }
-       IN \/ /\ entriesToDownload = {}  \* finish download
-             /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
-                                                     ![p].downloadReplica = None]
-          \/ /\ entriesToDownload # {}
-             /\ LET ind == Min(entriesToDownload)
-                IN /\ replicaState' = [replicaState EXCEPT ![p].log = Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(p))[ind])]
+       IN /\ entriesToDownload # {}
+          /\ LET ind == Min(entriesToDownload)
+                 finished == ind = finishPos
+             IN /\ replicaState' = [replicaState EXCEPT ![p].log = 
+                                                             IF finished
+                                                             THEN Append(Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(p))[ind]), [type |-> ViewBlock, view |-> ViewNumber(p)])
+                                                             ELSE Append(SubSeq(@, 1, ind - 1), Log(DownloadReplica(p))[ind]),
+                                                        ![p].downloadReplica =
+                                                                      IF finished
+                                                                      THEN None
+                                                                      ELSE @]
 
 \* Er -> Rc
 RecieveStartView(r) ==
@@ -264,6 +288,23 @@ ReplicaDownloadBeforeView(r) ==
 
 -----------------------------------------------------------------------------
 
+Finishing ==
+    /\ LET r == ReplicaSequence[1]
+          \* All Committed
+       IN /\ CommitNumber(r) = OpNumber(r)
+          \* MaxRequests commands are stored
+          /\ RequestBlockCount(Log(r)) = MaxRequests
+          \* All replicas equal
+          /\ \A r1 \in Replica:
+                 /\ Log(r1) = Log(r)
+                 /\ CommitNumber(r1) = CommitNumber(r)
+                 /\ ViewNumber(r1) = ViewNumber(r)
+                 /\ Status(r1) = Normal
+                 /\ DownloadReplica(r1) = None
+    /\ UNCHANGED <<replicaState>>
+
+-----------------------------------------------------------------------------
+
 NormalOperationProtocol ==
     \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
     \/ \E r \in Replica: RecievePrepare(r)
@@ -280,68 +321,40 @@ ViewChangeProtocol ==
 
 Next == \/ NormalOperationProtocol
         \/ ViewChangeProtocol
-
------------------------------------------------------------------------------
-
-(* Liveness *)
-
-\*EventuallyRecieveClientRequest == \A r \in Replica: WF_vars(\E op \in Operation: RecieveClientRequest(r, op))
-
-\*EventuallyRecievePrepare == \A r \in Replica: WF_vars(\E m \in msgs: RecievePrepare(r, m))
-
-\*EventuallyRecieveCommit == \A r \in Replica: WF_vars(\E m \in msgs: RecieveCommit(r, m))
-
-\*EventuallyRecievePrepareOk == \A p \in Replica: WF_vars(\E m \in msgs: RecievePrepareOk(p, m))
-
-\*LivenessSpec ==
-\*    /\ EventuallyRecieveClientRequest
-\*    /\ EventuallyRecievePrepare
-\*    /\ EventuallyRecieveCommit
-\*    /\ EventuallyRecievePrepareOk
+        \/ Finishing
 
 -----------------------------------------------------------------------------
 
 (* Full Spec *)
 
-Spec == Init /\ [][Next]_vars \* /\ LivenessSpec
+Spec == Init /\ [][Next]_vars /\ SF_vars(Next)
 
 -----------------------------------------------------------------------------
 
 (* INVARIANTS *)
 
-EveryViewHasAtLeastOnePrimary == \A v \in 0..10: \E r \in Replica: IsPrimaryInView(r, v)
+CommitedLogsPreficesAreEqual ==
+    \A r1, r2 \in Replica:
+        \A i \in DOMAIN Log(r1)
+            \cap DOMAIN Log(r2)
+            \cap 1 .. Min({CommitNumber(r1),
+                           CommitNumber(r2)}):
+                Log(r1)[i] = Log(r2)[i]
 
-EveryViewHasAtMostOnePrimary == \A v \in 0..10: \A r1, r2 \in Replica:
-                                                    (IsPrimaryInView(r1, v)
-                                                    /\ IsPrimaryInView(r2, v)) => r1 = r2
+KeepMaxRequests == \A r \in Replica: RequestBlockCount(Log(r)) <= MaxRequests
 
-PreficiesAreEqual(s1, s2) == \A i \in DOMAIN s1 \cap DOMAIN s2: s1[i] = s2[i]
-
-PreficiesOfLenAreEqual(s1, s2, prefLen) == \A i \in DOMAIN s1 \cap DOMAIN s2
-                                                              \cap 1..prefLen:
-                                                                  s1[i] = s2[i]
-
-CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(
-                                                           Log(r1),
-                                                           Log(r2),
-                                                           Min({
-                                                               CommitNumber(r1),
-                                                               CommitNumber(r2)
-                                                           })
-                                                       )
+KeepMaxViews == \A r \in Replica: ViewNumber(r) + 1 <= MaxViews
 
 -----------------------------------------------------------------------------
 
 (* Properties *)
 
-\*AllClientsWillBeServed == \A c \in Client: (pendingRequest[c] ~> ~pendingRequest[c])
-
-
+EventuallyFinished == <> (ENABLED Finishing)
 
 -----------------------------------------------------------------------------
 
 
 =============================================================================
 \* Modification History
-\* Last modified Thu May 04 20:07:23 MSK 2023 by tycoon
+\* Last modified Fri May 05 01:20:00 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon

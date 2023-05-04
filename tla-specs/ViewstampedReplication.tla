@@ -102,8 +102,6 @@ LastNormalView(r) == Max({Log(r)[v].view : v \in {i \in 1 .. LogLen(r) : Log(r)[
 
 OpNumber(r) == LogLen(r)
 
-NewOpNumber(r) == Len(Log(r)')
-
 DownloadReplica(r) == replicaState[r].downloadReplica
 
 CommitNumber(r) == replicaState[r].commitNumber
@@ -257,6 +255,7 @@ SendDownloadChunks(r) ==
                          n |-> opNum, k |-> CommitNumber(r), i |-> r]: opNum \in m.n .. LogLen(r) })
            /\ UNCHANGED <<replicaState>>
 
+(*
 \* Mc / Rc
 ReceiveDownloadChunk(r) ==
     /\ Status(r) # Recovering
@@ -271,25 +270,45 @@ ReceiveDownloadChunk(r) ==
        IN /\ msgsToDownload # {}
           /\ LET MinOpNum == Min({msg.n: msg \in msgsToDownload})
                  MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
-             IN /\ msgsToDownload # {}
-                /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
+             IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
                                                         ![r].commitNumber = MinMsg.k]
                 /\ UNCHANGED <<msgs>>
+*)
 
-\* Mc -> M
-MasterFinishDownload(p) ==
+\* Mc -> Mc / Mc -> M
+MasterDownloadBeforeView(p) ==
     /\ IsPrimary(p)
     /\ Status(p) # Recovering
     /\ IsDownloading(p)
-    /\ LET doViewChangeReceived == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p) /\ m.i = DownloadReplica(p)}
-           IN /\ doViewChangeReceived # {}
-              /\ OpNumber(p) >= (CHOOSE m \in doViewChangeReceived: TRUE).n
-    /\ replicaState' = [replicaState EXCEPT ![p].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)]),
-                                            ![p].downloadReplica = None]
-    /\ Send([type |-> StartView,
-             v |-> ViewNumber(p),
-             n |-> OpNumber(p)',
-             k |-> replicaState[p].commitNumber'])
+    /\ LET msgsToDownload == { msg \in msgs:
+                                   /\ msg.type = DownloadChunk 
+                                   /\ msg.v = ViewNumber(p)
+                                   /\ msg.i = DownloadReplica(p)
+                                   /\ \/ LogLen(p) + 1 = msg.n
+                                      \/ /\ LogLen(p) >= msg.n
+                                         /\ Log(p)[msg.n] # msg.m }
+       IN /\ msgsToDownload # {}
+          /\ LET doViewChangeReceived == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p) /\ m.i = DownloadReplica(p)}
+                 finished == OpNumber(p) + 1 >= (CHOOSE m \in doViewChangeReceived: TRUE).n
+                 MinOpNum == Min({msg.n: msg \in msgsToDownload})
+                 MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
+                 IN /\ replicaState' = [replicaState EXCEPT ![p].log =
+                                                                 IF finished
+                                                                 THEN Append(
+                                                                          Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
+                                                                          [type |-> ViewBlock, view |-> ViewNumber(p)]
+                                                                      )
+                                                                 ELSE Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
+                                                            ![p].downloadReplica =
+                                                                 IF finished
+                                                                 THEN None
+                                                                 ELSE @]
+                    /\ IF finished
+                       THEN Send([type |-> StartView,
+                                  v |-> ViewNumber(p),
+                                  n |-> OpNumber(p)',
+                                  k |-> replicaState[p].commitNumber'])
+                       ELSE UNCHANGED <<msgs>>
 
 RecieveStartView(r, m) ==
     /\ m.type = StartView
@@ -302,13 +321,26 @@ RecieveStartView(r, m) ==
     /\ Send([type |-> StartDownload, v |-> m.v, n |-> CommitNumber(r) + 1, src |-> PrimaryReplicaInView(m.v)])
 
 \* Rc -> Rc / Rc -> R
-ReplicaFinishDownload(r) ==
+ReplicaDownloadBeforeView(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ IsDownloading(r)
-    /\ Log(r)[LogLen(r)] = [type |-> ViewBlock, view |-> ViewNumber(r)]
-    /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, [type |-> ViewBlock, view |-> ViewNumber(r)]),
-                                            ![r].downloadReplica = None]
+    /\ LET msgsToDownload == { msg \in msgs:
+                                   /\ msg.type = DownloadChunk 
+                                   /\ msg.v = ViewNumber(r)
+                                   /\ msg.i = DownloadReplica(r)
+                                   /\ \/ LogLen(r) + 1 = msg.n
+                                      \/ /\ LogLen(r) >= msg.n
+                                         /\ Log(r)[msg.n] # msg.m }
+       IN /\ msgsToDownload # {}
+          /\ LET MinOpNum == Min({msg.n: msg \in msgsToDownload})
+                 MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
+                 finished == MinMsg.m = [type |-> ViewBlock, view |-> ViewNumber(r)]
+             IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
+                                                        ![r].downloadReplica =
+                                                             IF finished
+                                                             THEN None
+                                                             ELSE @]
     /\ UNCHANGED <<msgs>>
 
 -----------------------------------------------------------------------------
@@ -326,10 +358,10 @@ ViewChangeProtocol ==
     \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
     \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
     \/ \E r \in Replica: SendDownloadChunks(r)
-    \/ \E r \in Replica: ReceiveDownloadChunk(r)
-    \/ \E p \in Replica: MasterFinishDownload(p)
+\*    \/ \E r \in Replica: ReceiveDownloadChunk(r)
+    \/ \E p \in Replica: MasterDownloadBeforeView(p)
     \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
-    \/ \E r \in Replica: ReplicaFinishDownload(r)
+    \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
 
 Next == \/ NormalOperationProtocol
         \/ ViewChangeProtocol
@@ -384,5 +416,5 @@ CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Lo
 
 =============================================================================
 \* Modification History
-\* Last modified Thu May 04 19:50:04 MSK 2023 by tycoon
+\* Last modified Thu May 04 22:56:11 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
