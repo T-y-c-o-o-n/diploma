@@ -24,6 +24,9 @@ CONSTANTS StartViewChange, DoViewChange, StartView
 \* Sequence with all replicas (for view selection)
 CONSTANT ReplicaSequence
 
+\* For state space limitation
+CONSTANT MaxRequests, MaxViews
+
 \* State on each replica
 VARIABLE replicaState
 
@@ -119,6 +122,10 @@ IsPrimary(r) == IsPrimaryInView(r, ViewNumber(r))
 IsDownloading(r) ==
     /\ replicaState[r].downloadReplica # None
 
+RequestBlockCount(log) == Cardinality({i \in DOMAIN log: log[i].type = RequestBlock})
+
+ViewBlockCount(log) == Cardinality({i \in DOMAIN log: log[i].type = ViewBlock})
+
 -----------------------------------------------------------------------------
 
 AddClientRequest(r, m) ==
@@ -126,6 +133,7 @@ AddClientRequest(r, m) ==
 
 \* Implemented as Primary "generates" it by itself
 RecieveClientRequest(p, op) ==
+    /\ RequestBlockCount(Log(p)) < MaxRequests
     /\ IsPrimary(p)
     /\ Status(p) = Normal
     /\ ~IsDownloading(p)
@@ -137,6 +145,7 @@ RecieveClientRequest(p, op) ==
              n |-> OpNumber(p) + 1, k |-> CommitNumber(p), i |-> p])
 
 RecievePrepare(r, m) ==
+    /\ RequestBlockCount(Log(r)) < MaxRequests
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ ~IsDownloading(r)
@@ -185,6 +194,7 @@ RecieveCommit(r, m) ==
 (* View Changing *)
 
 TimeoutStartViewChanging(r) ==
+    /\ ViewNumber(r) + 1 < MaxViews
     /\ Status(r) = Normal
     /\ replicaState' = [replicaState EXCEPT ![r].downloadReplica = None,
                                             ![r].viewNumber = @ + 1,
@@ -211,11 +221,6 @@ RecieveStartViewChange(r, m) ==
           /\ Status(r) = ViewChange
           /\ UNCHANGED <<replicaState>>
           /\ CheckAchieveStartViewChangeFromQuorum(r, m.v)
-       \/ \* Stale view
-          /\ \/ ViewNumber(r) > m.v
-             \/ /\ ViewNumber(r) = m.v
-                /\ Status(r) = Normal
-          /\ UNCHANGED <<replicaState, msgs>>
 
 RecieveDoViewChange(p, m) ==
     /\ m.type = DoViewChange
@@ -239,8 +244,16 @@ AchieveDoViewChangeFromQuorum(p) ==
           /\ LET maxVV == Max({m.vv : m \in recieved})
                  maxN == Max({m.n : m \in {m \in recieved : m.vv = maxVV}})
                  maxReplicaIndex == Max({ReplicaIndex(m.i) : m \in {m \in recieved : m.vv = maxVV /\ m.n = maxN}})
-                 maxReplica == (CHOOSE m \in recieved: ReplicaIndex(m.i) = maxReplicaIndex).i
-             IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = maxReplica,
+                 maxReplica == IF /\ maxVV = LastNormalView(p)
+                                  /\ maxN = OpNumber(p)
+                               THEN p
+                               ELSE (CHOOSE m \in recieved: ReplicaIndex(m.i) = maxReplicaIndex).i
+             IN /\ replicaState' = [replicaState EXCEPT ![p].downloadReplica = IF maxReplica = p
+                                                                               THEN None
+                                                                               ELSE maxReplica,
+                                                        ![p].log = IF maxReplica = p
+                                                                   THEN Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)])
+                                                                   ELSE @,
                                                         ![p].status = Normal]
                 /\ Send([type |-> StartDownload, v |-> ViewNumber(p), n |-> CommitNumber(p) + 1, src |-> maxReplica])
 
@@ -254,26 +267,6 @@ SendDownloadChunks(r) ==
                          v |-> ViewNumber(r), m |-> Log(r)[opNum],
                          n |-> opNum, k |-> CommitNumber(r), i |-> r]: opNum \in m.n .. LogLen(r) })
            /\ UNCHANGED <<replicaState>>
-
-(*
-\* Mc / Rc
-ReceiveDownloadChunk(r) ==
-    /\ Status(r) # Recovering
-    /\ IsDownloading(r)
-    /\ LET msgsToDownload == { msg \in msgs:
-                                   /\ msg.type = DownloadChunk 
-                                   /\ msg.v = ViewNumber(r)
-                                   /\ msg.i = DownloadReplica(r)
-                                   /\ \/ LogLen(r) + 1 = msg.n
-                                      \/ /\ LogLen(r) >= msg.n
-                                         /\ Log(r)[msg.n] # msg.m }
-       IN /\ msgsToDownload # {}
-          /\ LET MinOpNum == Min({msg.n: msg \in msgsToDownload})
-                 MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
-             IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
-                                                        ![r].commitNumber = MinMsg.k]
-                /\ UNCHANGED <<msgs>>
-*)
 
 \* Mc -> Mc / Mc -> M
 MasterDownloadBeforeView(p) ==
@@ -345,6 +338,23 @@ ReplicaDownloadBeforeView(r) ==
 
 -----------------------------------------------------------------------------
 
+Finishing ==
+    /\ LET r == ReplicaSequence[1]
+          \* All Committed
+       IN /\ CommitNumber(r) = OpNumber(r)
+          \* MaxRequests commands are stored
+          /\ RequestBlockCount(Log(r)) = MaxRequests
+          \* All replicas equal
+          /\ \A r1 \in Replica:
+                 /\ Log(r1) = Log(r)
+                 /\ CommitNumber(r1) = CommitNumber(r)
+                 /\ ViewNumber(r1) = ViewNumber(r)
+                 /\ Status(r1) = Normal
+                 /\ DownloadReplica(r1) = None
+    /\ UNCHANGED <<replicaState, msgs>>
+
+-----------------------------------------------------------------------------
+
 NormalOperationProtocol ==
     \/ \E r \in Replica, op \in Operation: RecieveClientRequest(r, op)
     \/ \E r \in Replica, m \in msgs: RecievePrepare(r, m)
@@ -358,34 +368,21 @@ ViewChangeProtocol ==
     \/ \E p \in Replica, m \in msgs: RecieveDoViewChange(p, m)
     \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
     \/ \E r \in Replica: SendDownloadChunks(r)
-\*    \/ \E r \in Replica: ReceiveDownloadChunk(r)
     \/ \E p \in Replica: MasterDownloadBeforeView(p)
     \/ \E r \in Replica, m \in msgs: RecieveStartView(r, m)
     \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
 
 Next == \/ NormalOperationProtocol
         \/ ViewChangeProtocol
-
------------------------------------------------------------------------------
-
-(* Liveness *)
-
-EventuallyRecieveClientRequest == \A r \in Replica: WF_vars(\E op \in Operation: RecieveClientRequest(r, op))
-
-EventuallyRecievePrepare == \A r \in Replica: WF_vars(\E m \in msgs: RecievePrepare(r, m))
-
-EventuallyRecieveCommit == \A r \in Replica: WF_vars(\E m \in msgs: RecieveCommit(r, m))
-
-LivenessSpec ==
-    /\ EventuallyRecieveClientRequest
-    /\ EventuallyRecievePrepare
-    /\ EventuallyRecieveCommit
+        \/ Finishing
 
 -----------------------------------------------------------------------------
 
 (* Full Spec *)
 
 Spec == Init /\ [][Next]_vars
+
+FullSpec == Spec /\ SF_vars(Next)
 
 -----------------------------------------------------------------------------
 
@@ -395,26 +392,27 @@ VRNoMsgs == INSTANCE VR_without_message
 
 (* INVARIANTS *)
 
-EveryViewHasAtLeastOnePrimary == \A v \in 0..10: \E r \in Replica: IsPrimaryInView(r, v)
+CommitedLogsPreficesAreEqual ==
+    \A r1, r2 \in Replica:
+        \A i \in DOMAIN Log(r1)
+            \cap DOMAIN Log(r2)
+            \cap 1 .. Min({CommitNumber(r1),
+                           CommitNumber(r2)}):
+                Log(r1)[i] = Log(r2)[i]
 
-EveryViewHasAtMostOnePrimary == \A v \in 0..10: \A r1, r2 \in Replica:
-                                                    (IsPrimaryInView(r1, v) /\ IsPrimaryInView(r2, v)) => r1 = r2
+KeepMaxRequests == \A r \in Replica: RequestBlockCount(Log(r)) <= MaxRequests
 
-PreficiesAreEqual(s1, s2) == \A i \in DOMAIN s1 \cap DOMAIN s2: s1[i] = s2[i]
-
-PreficiesOfLenAreEqual(s1, s2, prefLen) == \A i \in DOMAIN s1 \cap DOMAIN s2 \cap 1..prefLen: s1[i] = s2[i]
-
-CommitedLogsPreficesAreEqual == \A r1, r2 \in Replica: PreficiesOfLenAreEqual(Log(r1), Log(r2), Min({CommitNumber(r1), CommitNumber(r2)}))
+KeepMaxViews == \A r \in Replica: ViewNumber(r) + 1 <= MaxViews
 
 -----------------------------------------------------------------------------
 
 (* Properties *)
 
-\*AllClientsWillBeServed == \A c \in Client: (pendingRequest[c] ~> ~pendingRequest[c])
+EventuallyFinished == <> (ENABLED Finishing)
 
 -----------------------------------------------------------------------------
 
 =============================================================================
 \* Modification History
-\* Last modified Thu May 04 22:56:11 MSK 2023 by tycoon
+\* Last modified Fri May 05 13:42:43 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon

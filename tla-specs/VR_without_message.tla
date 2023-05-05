@@ -18,13 +18,13 @@ CONSTANT None
 \* Sequence with all replicas (for view selection)
 CONSTANT ReplicaSequence
 
+\* For state space limitation
+CONSTANT MaxRequests, MaxViews
+
 \* State on each replica
 VARIABLE replicaState
 
 vars == <<replicaState>>
-
-\* For state space limitation
-CONSTANT MaxRequests, MaxViews
 
 -----------------------------------------------------------------------------
 
@@ -327,7 +327,9 @@ Next == \/ NormalOperationProtocol
 
 (* Full Spec *)
 
-Spec == Init /\ [][Next]_vars /\ SF_vars(Next)
+Spec == Init /\ [][Next]_vars
+
+FullSpec == Spec /\ SF_vars(Next)
 
 -----------------------------------------------------------------------------
 
@@ -356,5 +358,5 @@ EventuallyFinished == <> (ENABLED Finishing)
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 05 01:20:00 MSK 2023 by tycoon
+\* Last modified Fri May 05 13:43:04 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
