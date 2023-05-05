@@ -131,7 +131,6 @@ ViewBlockCount(log) == Cardinality({i \in DOMAIN log: log[i].type = ViewBlock})
 AddClientRequest(r, m) ==
     /\ replicaState' = [replicaState EXCEPT ![r].log = Append(@, m)]
 
-\* Implemented as Primary "generates" it by itself
 RecieveClientRequest(p, op) ==
     /\ RequestBlockCount(Log(p)) < MaxRequests
     /\ IsPrimary(p)
@@ -319,8 +318,9 @@ ReplicaDownloadBeforeView(r) ==
     /\ Status(r) = Normal
     /\ IsDownloading(r)
     /\ LET msgsToDownload == { msg \in msgs:
-                                   /\ msg.type = DownloadChunk 
+                                   /\ msg.type = DownloadChunk
                                    /\ msg.v = ViewNumber(r)
+                                   /\ msg.n > CommitNumber(r)
                                    /\ msg.i = DownloadReplica(r)
                                    /\ \/ LogLen(r) + 1 = msg.n
                                       \/ /\ LogLen(r) >= msg.n
@@ -329,7 +329,14 @@ ReplicaDownloadBeforeView(r) ==
           /\ LET MinOpNum == Min({msg.n: msg \in msgsToDownload})
                  MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
                  finished == MinMsg.m = [type |-> ViewBlock, view |-> ViewNumber(r)]
-             IN /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
+             IN /\ \* all previous chunks are exist (or else it is another download)
+                   \A prevPos \in CommitNumber(r) + 1 .. MinMsg.n - 1:
+                       \E prev \in msgsToDownload:
+                           /\ prev.type = DownloadChunk
+                           /\ prev.v = ViewNumber(r)
+                           /\ prev.i = DownloadReplica(r)
+                           /\ prev.n = prevPos
+                /\ replicaState' = [replicaState EXCEPT ![r].log = Append(SubSeq(@, 1, MinOpNum - 1), MinMsg.m),
                                                         ![r].downloadReplica =
                                                              IF finished
                                                              THEN None
@@ -388,6 +395,8 @@ FullSpec == Spec /\ SF_vars(Next)
 
 VRNoMsgs == INSTANCE VR_without_message
 
+THEOREM Spec => VRNoMsgs!Spec
+
 -----------------------------------------------------------------------------
 
 (* INVARIANTS *)
@@ -414,5 +423,5 @@ EventuallyFinished == <> (ENABLED Finishing)
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 05 13:42:43 MSK 2023 by tycoon
+\* Last modified Fri May 05 20:10:25 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon

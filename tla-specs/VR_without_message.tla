@@ -315,8 +315,8 @@ ViewChangeProtocol ==
     \/ \E r \in Replica: TimeoutStartViewChanging(r)
     \/ \E r \in Replica: RecieveStartViewChange(r)
     \/ \E r \in Replica: AchieveDoViewChangeFromQuorum(r)
-    \/ \E r \in Replica: RecieveStartView(r)
     \/ \E p \in Replica: MasterDownloadBeforeView(p)
+    \/ \E r \in Replica: RecieveStartView(r)
     \/ \E r \in Replica: ReplicaDownloadBeforeView(r)
 
 Next == \/ NormalOperationProtocol
@@ -347,16 +347,26 @@ KeepMaxRequests == \A r \in Replica: RequestBlockCount(Log(r)) <= MaxRequests
 
 KeepMaxViews == \A r \in Replica: ViewNumber(r) + 1 <= MaxViews
 
+THEOREM Spec => TypeOK
+
+THEOREM Spec => CommitedLogsPreficesAreEqual
+
+THEOREM Spec => KeepMaxRequests
+
+THEOREM Spec => KeepMaxViews
+
 -----------------------------------------------------------------------------
 
 (* Properties *)
 
 EventuallyFinished == <> (ENABLED Finishing)
 
+THEOREM FullSpec => EventuallyFinished
+
 -----------------------------------------------------------------------------
 
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 05 13:43:04 MSK 2023 by tycoon
+\* Last modified Fri May 05 16:06:53 MSK 2023 by tycoon
 \* Created Wed Dec 28 15:30:37 MSK 2022 by tycoon
