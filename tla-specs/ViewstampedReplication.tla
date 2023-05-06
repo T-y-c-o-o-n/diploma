@@ -280,10 +280,10 @@ MasterDownloadBeforeView(p) ==
                                       \/ /\ LogLen(p) >= msg.n
                                          /\ Log(p)[msg.n] # msg.m }
        IN /\ msgsToDownload # {}
-          /\ LET doViewChangeReceived == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p) /\ m.i = DownloadReplica(p)}
-                 finished == OpNumber(p) + 1 >= (CHOOSE m \in doViewChangeReceived: TRUE).n
+          /\ LET doViewChangeReceived == {m \in msgs: m.type = DoViewChange /\ m.v = ViewNumber(p)}
                  MinOpNum == Min({msg.n: msg \in msgsToDownload})
                  MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
+                 finished == MinOpNum >= (CHOOSE m \in doViewChangeReceived: m.i = DownloadReplica(p)).n
                  IN /\ replicaState' = [replicaState EXCEPT ![p].log =
                                                                  IF finished
                                                                  THEN Append(
@@ -423,5 +423,5 @@ EventuallyFinished == <> (ENABLED Finishing)
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 05 20:10:25 MSK 2023 by tycoon
+\* Last modified Sat May 06 18:42:19 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
