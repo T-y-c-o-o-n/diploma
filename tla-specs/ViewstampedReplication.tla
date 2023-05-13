@@ -36,8 +36,6 @@ vars == <<replicaState, msgs>>
 
 -----------------------------------------------------------------------------
 
-Statuses == {Normal, ViewChange, Recovering}
-
 LogEntry == [type: {RequestBlock}, opNumber: Nat, op: Operation]
        \cup [type: {ViewBlock}, view: Nat]
 
@@ -54,6 +52,8 @@ Message == [type: {DownloadChunk}, v: Nat, m: LogEntry, n: Nat, k: Nat, i: Repli
 Send(m) == msgs' = msgs \cup {m}
 
 SendAll(ms) == /\ msgs' = msgs \cup ms
+
+Statuses == {Normal, ViewChange, Recovering}
 
 TypeOK == /\ replicaState \in [
             Replica -> [
@@ -202,7 +202,8 @@ TimeoutStartViewChanging(r) ==
 
 CheckAchieveStartViewChangeFromQuorum(r, v) ==
     /\ IF \E Q \in Quorum: /\ r \in Q
-                           /\ Q = {r} \cup {m.i : m \in {m \in msgs: m.type = StartViewChange /\ m.v = replicaState'[r].viewNumber}}
+                           /\ Q = {r} \cup {m.i : m \in {m \in msgs: m.type = StartViewChange
+                                                         /\ m.v = replicaState'[r].viewNumber}}
        THEN Send([type |-> DoViewChange, v |-> v, vv |-> LastNormalView(r),
                   n |-> OpNumber(r), k |-> CommitNumber(r), i |-> r])
        ELSE UNCHANGED <<msgs>>
@@ -218,8 +219,12 @@ RecieveStartViewChange(r, m) ==
        \/ \* Our view number
           /\ ViewNumber(r) = m.v
           /\ Status(r) = ViewChange
+          /\ \E Q \in Quorum: /\ r \in Q
+                              /\ Q = {r} \cup {m.i : mm \in {mm \in msgs: mm.type = StartViewChange
+                                                             /\ mm.v = m.v}}
+          /\ Send([type |-> DoViewChange, v |-> m.v, vv |-> LastNormalView(r),
+                   n |-> OpNumber(r), k |-> CommitNumber(r), i |-> r])
           /\ UNCHANGED <<replicaState>>
-          /\ CheckAchieveStartViewChangeFromQuorum(r, m.v)
 
 RecieveDoViewChange(p, m) ==
     /\ m.type = DoViewChange
@@ -254,7 +259,9 @@ AchieveDoViewChangeFromQuorum(p) ==
                                                                    THEN Append(@, [type |-> ViewBlock, view |-> ViewNumber(p)])
                                                                    ELSE @,
                                                         ![p].status = Normal]
-                /\ Send([type |-> StartDownload, v |-> ViewNumber(p), n |-> CommitNumber(p) + 1, src |-> maxReplica])
+                /\ IF maxReplica = p
+                   THEN Send([type |-> StartView, v |-> ViewNumber(p), n |-> OpNumber(p)', k |-> replicaState[p].commitNumber'])
+                   ELSE Send([type |-> StartDownload, v |-> ViewNumber(p), n |-> CommitNumber(p) + 1, src |-> maxReplica])
 
 SendDownloadChunks(r) ==
     /\ Status(r) # Recovering
@@ -317,21 +324,22 @@ ReplicaDownloadBeforeView(r) ==
     /\ ~IsPrimary(r)
     /\ Status(r) = Normal
     /\ IsDownloading(r)
-    /\ LET msgsToDownload == { msg \in msgs:
+    /\ LET allMsgsToDownload == { msg \in msgs:
                                    /\ msg.type = DownloadChunk
                                    /\ msg.v = ViewNumber(r)
                                    /\ msg.n > CommitNumber(r)
-                                   /\ msg.i = DownloadReplica(r)
-                                   /\ \/ LogLen(r) + 1 = msg.n
-                                      \/ /\ LogLen(r) >= msg.n
-                                         /\ Log(r)[msg.n] # msg.m }
+                                   /\ msg.i = DownloadReplica(r) }
+           msgsToDownload == { msg \in allMsgsToDownload:
+                                   \/ LogLen(r) + 1 = msg.n
+                                   \/ /\ LogLen(r) >= msg.n
+                                      /\ Log(r)[msg.n] # msg.m}
        IN /\ msgsToDownload # {}
           /\ LET MinOpNum == Min({msg.n: msg \in msgsToDownload})
                  MinMsg == CHOOSE msg \in msgsToDownload: msg.n = MinOpNum
                  finished == MinMsg.m = [type |-> ViewBlock, view |-> ViewNumber(r)]
              IN /\ \* all previous chunks are exist (or else it is another download)
                    \A prevPos \in CommitNumber(r) + 1 .. MinMsg.n - 1:
-                       \E prev \in msgsToDownload:
+                       \E prev \in allMsgsToDownload:
                            /\ prev.type = DownloadChunk
                            /\ prev.v = ViewNumber(r)
                            /\ prev.i = DownloadReplica(r)
@@ -389,7 +397,22 @@ Next == \/ NormalOperationProtocol
 
 Spec == Init /\ [][Next]_vars
 
-FullSpec == Spec /\ SF_vars(Next)
+FullSpec == /\ Init
+            /\ [][Next]_vars
+            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartViewChange(r, m))
+            /\ WF_<<vars>>(\E r \in Replica, op \in Operation: RecieveClientRequest(r, op))
+            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecievePrepare(r, m))
+            /\ WF_<<vars>>(\E r \in Replica: PrepareOperation(r))
+            /\ WF_<<vars>>(\E p \in Replica: AchievePrepareOkFromQuorum(p))
+            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveCommit(r, m))
+            /\ WF_<<vars>>(\E r \in Replica: TimeoutStartViewChanging(r))
+            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartViewChange(r, m))
+            /\ WF_<<vars>>(\E p \in Replica, m \in msgs: RecieveDoViewChange(p, m))
+            /\ WF_<<vars>>(\E r \in Replica: AchieveDoViewChangeFromQuorum(r))
+            /\ WF_<<vars>>(\E r \in Replica: SendDownloadChunks(r))
+            /\ WF_<<vars>>(\E p \in Replica: MasterDownloadBeforeView(p))
+            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartView(r, m))
+            /\ WF_<<vars>>(\E r \in Replica: ReplicaDownloadBeforeView(r))
 
 -----------------------------------------------------------------------------
 
@@ -423,5 +446,5 @@ EventuallyFinished == <> (ENABLED Finishing)
 
 =============================================================================
 \* Modification History
-\* Last modified Sat May 06 18:42:19 MSK 2023 by tycoon
+\* Last modified Fri May 12 14:50:50 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
