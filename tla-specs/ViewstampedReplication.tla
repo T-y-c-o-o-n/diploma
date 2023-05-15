@@ -202,8 +202,8 @@ TimeoutStartViewChanging(r) ==
 
 CheckAchieveStartViewChangeFromQuorum(r, v) ==
     /\ IF \E Q \in Quorum: /\ r \in Q
-                           /\ Q = {r} \cup {m.i : m \in {m \in msgs: m.type = StartViewChange
-                                                         /\ m.v = replicaState'[r].viewNumber}}
+                           /\ Q = {r} \cup {m.i : m \in {mm \in msgs: mm.type = StartViewChange
+                                                         /\ mm.v = replicaState'[r].viewNumber}}
        THEN Send([type |-> DoViewChange, v |-> v, vv |-> LastNormalView(r),
                   n |-> OpNumber(r), k |-> CommitNumber(r), i |-> r])
        ELSE UNCHANGED <<msgs>>
@@ -220,8 +220,8 @@ RecieveStartViewChange(r, m) ==
           /\ ViewNumber(r) = m.v
           /\ Status(r) = ViewChange
           /\ \E Q \in Quorum: /\ r \in Q
-                              /\ Q = {r} \cup {m.i : mm \in {mm \in msgs: mm.type = StartViewChange
-                                                             /\ mm.v = m.v}}
+                              /\ Q \subseteq {r} \cup {mm.i : mm \in {mmm \in msgs: mmm.type = StartViewChange
+                                                              /\ mmm.v = m.v}}
           /\ Send([type |-> DoViewChange, v |-> m.v, vv |-> LastNormalView(r),
                    n |-> OpNumber(r), k |-> CommitNumber(r), i |-> r])
           /\ UNCHANGED <<replicaState>>
@@ -399,7 +399,8 @@ Spec == Init /\ [][Next]_vars
 
 FullSpec == /\ Init
             /\ [][Next]_vars
-            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartViewChange(r, m))
+            /\ WF_<<vars>>(Next)
+            (*/\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartViewChange(r, m))
             /\ WF_<<vars>>(\E r \in Replica, op \in Operation: RecieveClientRequest(r, op))
             /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecievePrepare(r, m))
             /\ WF_<<vars>>(\E r \in Replica: PrepareOperation(r))
@@ -412,7 +413,7 @@ FullSpec == /\ Init
             /\ WF_<<vars>>(\E r \in Replica: SendDownloadChunks(r))
             /\ WF_<<vars>>(\E p \in Replica: MasterDownloadBeforeView(p))
             /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartView(r, m))
-            /\ WF_<<vars>>(\E r \in Replica: ReplicaDownloadBeforeView(r))
+            /\ WF_<<vars>>(\E r \in Replica: ReplicaDownloadBeforeView(r))*)
 
 -----------------------------------------------------------------------------
 
@@ -446,5 +447,5 @@ EventuallyFinished == <> (ENABLED Finishing)
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 12 14:50:50 MSK 2023 by tycoon
+\* Last modified Mon May 15 08:25:11 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
