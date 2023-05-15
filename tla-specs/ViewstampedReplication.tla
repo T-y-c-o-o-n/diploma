@@ -400,20 +400,6 @@ Spec == Init /\ [][Next]_vars
 FullSpec == /\ Init
             /\ [][Next]_vars
             /\ WF_<<vars>>(Next)
-            (*/\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartViewChange(r, m))
-            /\ WF_<<vars>>(\E r \in Replica, op \in Operation: RecieveClientRequest(r, op))
-            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecievePrepare(r, m))
-            /\ WF_<<vars>>(\E r \in Replica: PrepareOperation(r))
-            /\ WF_<<vars>>(\E p \in Replica: AchievePrepareOkFromQuorum(p))
-            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveCommit(r, m))
-            /\ WF_<<vars>>(\E r \in Replica: TimeoutStartViewChanging(r))
-            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartViewChange(r, m))
-            /\ WF_<<vars>>(\E p \in Replica, m \in msgs: RecieveDoViewChange(p, m))
-            /\ WF_<<vars>>(\E r \in Replica: AchieveDoViewChangeFromQuorum(r))
-            /\ WF_<<vars>>(\E r \in Replica: SendDownloadChunks(r))
-            /\ WF_<<vars>>(\E p \in Replica: MasterDownloadBeforeView(p))
-            /\ WF_<<vars>>(\E r \in Replica, m \in msgs: RecieveStartView(r, m))
-            /\ WF_<<vars>>(\E r \in Replica: ReplicaDownloadBeforeView(r))*)
 
 -----------------------------------------------------------------------------
 
@@ -447,5 +433,5 @@ EventuallyFinished == <> (ENABLED Finishing)
 
 =============================================================================
 \* Modification History
-\* Last modified Mon May 15 08:25:11 MSK 2023 by tycoon
+\* Last modified Mon May 15 09:33:48 MSK 2023 by tycoon
 \* Created Mon Nov 07 20:04:34 MSK 2022 by tycoon
